@@ -24,48 +24,36 @@ pub const CPU = struct {
     }
 
     pub fn executeOp(self: *Self) !usize {
-        const opcode: Opcode = @enumFromInt(self.readProgramMemory(u8));
+        const opcode_byte = self.readProgramMemory(u8);
+        const opcode: Opcode = @enumFromInt(opcode_byte);
         self.pc += 1;
 
-        var duration: usize = 0;
-
         switch (opcode) {
-            Opcode.NOP => {
-                duration = 4;
-            },
-            Opcode.STOP => {
-                duration = 4;
-            },
+            Opcode.NOP => {},
+            Opcode.STOP => {},
+
             Opcode.LD_a16_addr_SP => {
                 const addr = self.readProgramMemory(u16);
                 self.writeMemory(u16, addr, self.sp);
                 self.pc += 2;
-                duration = 20;
             },
             Opcode.LD_BC_n16 => {
                 self.bc = self.readProgramMemory(u16);
                 self.pc += 2;
-                duration = 12;
             },
             Opcode.LD_DE_n16 => {
                 self.de = self.readProgramMemory(u16);
                 self.pc += 2;
-                duration = 12;
             },
             Opcode.LD_HL_n16 => {
                 self.hl = self.readProgramMemory(u16);
                 self.pc += 2;
-                duration = 12;
             },
             Opcode.LD_SP_n16 => {
                 self.sp = self.readProgramMemory(u16);
                 self.pc += 2;
-                duration = 12;
             },
-            Opcode.LD_BC_addr_A => {
-                self.writeMemory(u8, self.bc, self.a());
-                duration = 8;
-            },
+            Opcode.LD_BC_addr_A => self.writeMemory(u8, self.bc, self.a()),
             Opcode.LD_DE_addr_A => self.writeMemory(u8, self.de, self.a()),
             Opcode.LD_HLI_addr_A => {
                 self.writeMemory(u8, self.hl, self.a());
@@ -669,7 +657,95 @@ pub const CPU = struct {
             Opcode.RST_38 => self.callAddr(0x38),
         }
 
-        return duration;
+        return switch (opcode_byte & 0o300) {
+            0o000 => switch (opcode_byte & 0o007) {
+                0 => switch (opcode) {
+                    Opcode.NOP => 4,
+                    Opcode.LD_a16_addr_SP => 20,
+                    Opcode.STOP => 4,
+                    Opcode.JR_e8 => 12,
+                    Opcode.JR_NZ_e8 => if (!self.getFlags().zero) 12 else 8,
+                    Opcode.JR_Z_e8 => if (self.getFlags().zero) 12 else 8,
+                    Opcode.JR_NC_e8 => if (!self.getFlags().carry) 12 else 8,
+                    Opcode.JR_C_e8 => if (self.getFlags().carry) 12 else 8,
+                    else => 12,
+                },
+                1 => if (((opcode_byte & 0o70) % 16) == 0) 12 else 8,
+                2 => 8,
+                3 => 8,
+                4 => if (opcode == Opcode.INC_HL_ADDR) 12 else 4,
+                5 => if (opcode == Opcode.DEC_HL_ADDR) 12 else 4,
+                6 => if (opcode == Opcode.LD_HL_ADDR_n8) 12 else 4,
+                7 => 4,
+                else => return CPUError.UnknownOpcode,
+            },
+            0o100 => if (opcode_byte & 6 == 6) 8 else 4,
+            0o200 => if (opcode_byte & 6 == 6) 8 else 4,
+            0o300 => switch (opcode_byte & 0o007) {
+                0 => switch (opcode) {
+                    Opcode.RET_NZ => if (!self.getFlags().zero) 20 else 8,
+                    Opcode.RET_Z => if (self.getFlags().zero) 20 else 8,
+                    Opcode.RET_NC => if (!self.getFlags().carry) 20 else 8,
+                    Opcode.RET_C => if (self.getFlags().carry) 20 else 8,
+                    Opcode.LDH_a8_addr_A => 12,
+                    Opcode.ADD_SP_e8 => 16,
+                    Opcode.LDH_A_a8_addr => 12,
+                    Opcode.LD_HL_SP_add_e8 => 12,
+                    else => return CPUError.UnknownOpcode,
+                },
+                1 => switch (opcode) {
+                    Opcode.POP_BC => 12,
+                    Opcode.RET => 16,
+                    Opcode.POP_DE => 12,
+                    Opcode.RETI => 16,
+                    Opcode.POP_HL => 12,
+                    Opcode.JP_HL => 4,
+                    Opcode.POP_AF => 12,
+                    Opcode.LD_SP_HL => 8,
+                    else => return CPUError.UnknownOpcode,
+                },
+                2 => switch (opcode) {
+                    Opcode.JP_NZ_a16 => if (!self.getFlags().zero) 16 else 12,
+                    Opcode.JP_Z_a16 => if (self.getFlags().zero) 16 else 12,
+                    Opcode.JP_NC_a16 => if (!self.getFlags().carry) 16 else 12,
+                    Opcode.JP_C_a16 => if (self.getFlags().carry) 16 else 12,
+                    Opcode.LD_C_addr_A => 8,
+                    Opcode.LD_a16_addr_A => 16,
+                    Opcode.LD_A_C_addr => 8,
+                    Opcode.LD_A_a16_addr => 16,
+                    else => return CPUError.UnknownOpcode,
+                },
+                3 => switch (opcode) {
+                    Opcode.JP_a16 => 16,
+                    Opcode.PREFIX => switch (self.readMemory(u8, self.pc - 1) & 0o07) {
+                        6 => if (self.readMemory(u8, self.pc - 1) & 0o300 == 0o100) 12 else 16,
+                        else => 8,
+                    },
+                    Opcode.DI => 4,
+                    Opcode.EI => 4,
+                    else => return CPUError.UnknownOpcode,
+                },
+                4 => switch (opcode) {
+                    Opcode.CALL_NZ_a16 => if (!self.getFlags().zero) 24 else 12,
+                    Opcode.CALL_Z_a16 => if (self.getFlags().zero) 24 else 12,
+                    Opcode.CALL_NC_a16 => if (!self.getFlags().carry) 24 else 12,
+                    Opcode.CALL_C_a16 => if (self.getFlags().carry) 24 else 12,
+                    else => return CPUError.UnknownOpcode,
+                },
+                5 => switch (opcode) {
+                    Opcode.PUSH_BC => 16,
+                    Opcode.CALL_a16 => 24,
+                    Opcode.PUSH_DE => 16,
+                    Opcode.PUSH_HL => 16,
+                    Opcode.PUSH_AF => 16,
+                    else => return CPUError.UnknownOpcode,
+                },
+                6 => 8,
+                7 => 16,
+                else => return CPUError.UnknownOpcode,
+            },
+            else => return CPUError.UnknownOpcode,
+        };
     }
 
     fn popStack(self: *Self) u16 {
@@ -1020,7 +1096,7 @@ test "cpu tests" {
         defer parsed.deinit();
 
         for (parsed.value) |t| {
-            std.debug.print("Running test {s}...\n", .{t.name});
+            std.debug.print("Running test {s}...", .{t.name});
 
             var mem1 = Memory.new();
             var mem2 = Memory.new();
@@ -1028,13 +1104,15 @@ test "cpu tests" {
             var cpu = t.initial.createCPU(mem1.memoryArray());
             const final_cpu = t.final.createCPU(mem2.memoryArray());
 
-            _ = try cpu.executeOp();
+            const duration = try cpu.executeOp();
 
             if (try compareCPUs(std.testing.allocator, &cpu, &final_cpu)) |err| {
-                std.debug.print("error: {s}\n", .{err});
+                std.debug.print(" FAILED: {s}\n", .{err});
                 std.testing.allocator.free(err);
                 return error{FAILED}.FAILED;
             }
+
+            std.debug.print(" PASSED! Duration: {d}\n", .{duration});
         }
     }
 }
