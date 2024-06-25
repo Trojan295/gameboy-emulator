@@ -1,5 +1,6 @@
 const std = @import("std");
 const Opcode = @import("opcodes.zig").Opcode;
+const Memory = @import("memory.zig").Memory;
 
 pub const CPUError = error{
     UnknownOpcode,
@@ -12,44 +13,59 @@ pub const CPU = struct {
     hl: u16,
     sp: u16,
     pc: u16,
+    ime: bool,
 
-    memory: Memory = Memory{},
+    memory: *[0x10000]u8,
 
     const Self = @This();
 
     pub fn getFlags(self: *Self) *FlagsRegister {
         return @ptrCast(&self.af);
     }
-    pub fn executeOp(self: *Self) !void {
+
+    pub fn executeOp(self: *Self) !usize {
         const opcode: Opcode = @enumFromInt(self.readProgramMemory(u8));
         self.pc += 1;
 
-        switch (opcode) {
-            Opcode.NOP => {},
-            Opcode.STOP => {},
+        var duration: usize = 0;
 
+        switch (opcode) {
+            Opcode.NOP => {
+                duration = 4;
+            },
+            Opcode.STOP => {
+                duration = 4;
+            },
             Opcode.LD_a16_addr_SP => {
                 const addr = self.readProgramMemory(u16);
                 self.writeMemory(u16, addr, self.sp);
                 self.pc += 2;
+                duration = 20;
             },
             Opcode.LD_BC_n16 => {
                 self.bc = self.readProgramMemory(u16);
                 self.pc += 2;
+                duration = 12;
             },
             Opcode.LD_DE_n16 => {
                 self.de = self.readProgramMemory(u16);
                 self.pc += 2;
+                duration = 12;
             },
             Opcode.LD_HL_n16 => {
                 self.hl = self.readProgramMemory(u16);
                 self.pc += 2;
+                duration = 12;
             },
             Opcode.LD_SP_n16 => {
                 self.sp = self.readProgramMemory(u16);
                 self.pc += 2;
+                duration = 12;
             },
-            Opcode.LD_BC_addr_A => self.writeMemory(u8, self.bc, self.a()),
+            Opcode.LD_BC_addr_A => {
+                self.writeMemory(u8, self.bc, self.a());
+                duration = 8;
+            },
             Opcode.LD_DE_addr_A => self.writeMemory(u8, self.de, self.a()),
             Opcode.LD_HLI_addr_A => {
                 self.writeMemory(u8, self.hl, self.a());
@@ -374,7 +390,310 @@ pub const CPU = struct {
             Opcode.XOR_A_A => self.setA(self.xor8(self.a(), self.a())),
             Opcode.OR_A_A => self.setA(self.or8(self.a(), self.a())),
             Opcode.CP_A_A => _ = self.sub8(self.a(), self.a()),
+
+            Opcode.RET_NZ => {
+                if (!self.getFlags().zero) self.pc = self.popStack();
+            },
+            Opcode.RET_Z => {
+                if (self.getFlags().zero) self.pc = self.popStack();
+            },
+            Opcode.RET_NC => {
+                if (!self.getFlags().carry) self.pc = self.popStack();
+            },
+            Opcode.RET_C => {
+                if (self.getFlags().carry) self.pc = self.popStack();
+            },
+            Opcode.ADD_SP_e8 => {
+                const val = self.readProgramMemory(u8);
+
+                self.getFlags().carry = ((self.sp & 0xff)) + (val & 0xff) > 0xff;
+                self.getFlags().half_carry = ((self.sp & 0xf) + (val & 0xf)) > 0xf;
+                self.getFlags().zero = false;
+                self.getFlags().substract = false;
+
+                self.sp +%= val;
+                if (val & 0x80 == 0x80) {
+                    self.sp -%= 256;
+                }
+
+                self.pc += 1;
+            },
+
+            Opcode.LDH_a8_addr_A => {
+                const addr = @as(u16, self.readProgramMemory(u8)) + 0xff00;
+                self.pc += 1;
+                self.writeMemory(u8, addr, self.a());
+            },
+            Opcode.LDH_A_a8_addr => {
+                const addr = @as(u16, self.readProgramMemory(u8)) + 0xff00;
+                self.pc += 1;
+                self.setA(self.readMemory(u8, addr));
+            },
+            Opcode.LD_HL_SP_add_e8 => {
+                const val = self.readProgramMemory(u8);
+
+                self.getFlags().carry = ((self.sp & 0xff)) + (val & 0xff) > 0xff;
+                self.getFlags().half_carry = ((self.sp & 0xf) + (val & 0xf)) > 0xf;
+                self.getFlags().zero = false;
+                self.getFlags().substract = false;
+
+                self.hl = self.sp +% val;
+                if (val & 0x80 == 0x80) {
+                    self.hl -%= 256;
+                }
+
+                self.pc += 1;
+            },
+
+            Opcode.LD_A_a16_addr => {
+                self.setA(self.readMemory(u8, self.readProgramMemory(u16)));
+                self.pc += 2;
+            },
+            Opcode.LD_A_C_addr => {
+                self.setA(self.readMemory(u8, @as(u16, self.c()) + 0xff00));
+            },
+            Opcode.LD_a16_addr_A => {
+                const addr = self.readProgramMemory(u16);
+                self.writeMemory(u8, addr, self.a());
+                self.pc += 2;
+            },
+            Opcode.LD_C_addr_A => {
+                const addr = @as(u16, self.c()) + 0xff00;
+                self.writeMemory(u8, addr, self.a());
+            },
+            Opcode.LD_SP_HL => self.sp = self.hl,
+
+            Opcode.DI => {},
+            Opcode.EI => {
+                self.ime = true;
+            },
+            Opcode.PREFIX => {
+                const prefixed_opcode = self.readProgramMemory(u8);
+                self.pc += 1;
+
+                const register: *u8 = switch (prefixed_opcode & 0o7) {
+                    0 => @ptrFromInt(@intFromPtr(&self.bc) + 1),
+                    1 => @ptrFromInt(@intFromPtr(&self.bc)),
+                    2 => @ptrFromInt(@intFromPtr(&self.de) + 1),
+                    3 => @ptrFromInt(@intFromPtr(&self.de)),
+                    4 => @ptrFromInt(@intFromPtr(&self.hl) + 1),
+                    5 => @ptrFromInt(@intFromPtr(&self.hl)),
+                    6 => @ptrFromInt(@intFromPtr(&self.memory[self.hl])),
+                    7 => @ptrFromInt(@intFromPtr(&self.af) + 1),
+                    else => {
+                        return CPUError.UnknownOpcode;
+                    },
+                };
+
+                switch (prefixed_opcode & 0o300) {
+                    0o000 => {
+                        switch (prefixed_opcode & 0o370) {
+                            0o000 => {
+                                self.getFlags().substract = false;
+                                self.getFlags().half_carry = false;
+                                const shifted, const overflow = @shlWithOverflow(register.*, 1);
+                                self.getFlags().carry = overflow == 1;
+                                register.* = shifted + overflow;
+                                self.getFlags().zero = register.* == 0;
+                            },
+                            0o010 => {
+                                self.getFlags().substract = false;
+                                self.getFlags().half_carry = false;
+                                const lsb: u1 = @truncate(register.*);
+                                register.* = (register.* >> 1) + (@as(u8, lsb) << 7);
+                                self.getFlags().carry = lsb == 1;
+                                self.getFlags().zero = register.* == 0;
+                            },
+                            0o020 => {
+                                self.getFlags().substract = false;
+                                self.getFlags().half_carry = false;
+                                const shifted, const carry = @shlWithOverflow(register.*, 1);
+                                register.* = if (self.getFlags().carry) shifted + 1 else shifted;
+                                self.getFlags().carry = carry == 1;
+                                self.getFlags().zero = register.* == 0;
+                            },
+                            0o030 => {
+                                self.getFlags().substract = false;
+                                self.getFlags().half_carry = false;
+                                const lsb: u1 = @truncate(register.*);
+                                const carry_bit: u8 = if (self.getFlags().carry) 1 else 0;
+                                register.* = (register.* >> 1) + (carry_bit << 7);
+                                self.getFlags().carry = lsb == 1;
+                                self.getFlags().zero = register.* == 0;
+                            },
+                            0o040 => {
+                                self.getFlags().substract = false;
+                                self.getFlags().half_carry = false;
+                                const shifted, const overflow = @shlWithOverflow(register.*, 1);
+                                self.getFlags().carry = overflow == 1;
+                                register.* = shifted;
+                                self.getFlags().zero = register.* == 0;
+                            },
+                            0o050 => {
+                                self.getFlags().substract = false;
+                                self.getFlags().half_carry = false;
+                                self.getFlags().carry = register.* & 1 == 1;
+                                register.* = (register.* >> 1) + (register.* & 0x80);
+                                self.getFlags().zero = register.* == 0;
+                            },
+                            0o060 => {
+                                const upper = register.* & 0xf0;
+                                const lower = register.* & 0xf;
+
+                                register.* = (upper >> 4) + (lower << 4);
+
+                                self.getFlags().carry = false;
+                                self.getFlags().half_carry = false;
+                                self.getFlags().substract = false;
+                                self.getFlags().zero = register.* == 0;
+                            },
+                            0o070 => {
+                                self.getFlags().substract = false;
+                                self.getFlags().half_carry = false;
+                                self.getFlags().carry = register.* & 1 == 1;
+                                register.* = (register.* >> 1);
+                                self.getFlags().zero = register.* == 0;
+                            },
+                            else => {
+                                return CPUError.UnknownOpcode;
+                            },
+                        }
+                    },
+                    0o100 => {
+                        const bit = (prefixed_opcode & 0o70) >> 3;
+                        const test_mask = std.math.pow(u8, 2, bit);
+
+                        self.getFlags().zero = register.* & test_mask == 0;
+                        self.getFlags().substract = false;
+                        self.getFlags().half_carry = true;
+                    },
+                    0o200 => {
+                        const bit = (prefixed_opcode & 0o70) >> 3;
+                        const mask = std.math.pow(u8, 2, bit);
+                        register.* &= ~mask;
+                    },
+                    0o300 => {
+                        const bit = (prefixed_opcode & 0o70) >> 3;
+                        const mask = std.math.pow(u8, 2, bit);
+                        register.* |= mask;
+                    },
+                    else => {},
+                }
+            },
+
+            Opcode.PUSH_BC => self.pushStack(self.bc),
+            Opcode.PUSH_DE => self.pushStack(self.de),
+            Opcode.PUSH_HL => self.pushStack(self.hl),
+            Opcode.PUSH_AF => self.pushStack(self.af),
+            Opcode.POP_BC => self.bc = self.popStack(),
+            Opcode.POP_DE => self.de = self.popStack(),
+            Opcode.POP_HL => self.hl = self.popStack(),
+            Opcode.POP_AF => {
+                self.af = self.popStack();
+                self.setF(self.f() & 0xf0);
+            },
+
+            Opcode.CALL_NZ_a16 => {
+                if (!self.getFlags().zero) self.call() else self.pc += 2;
+            },
+            Opcode.CALL_NC_a16 => {
+                if (!self.getFlags().carry) self.call() else self.pc += 2;
+            },
+            Opcode.CALL_Z_a16 => {
+                if (self.getFlags().zero) self.call() else self.pc += 2;
+            },
+            Opcode.CALL_C_a16 => {
+                if (self.getFlags().carry) self.call() else self.pc += 2;
+            },
+            Opcode.CALL_a16 => self.call(),
+            Opcode.RET => self.pc = self.popStack(),
+            Opcode.RETI => {
+                self.ime = true;
+                self.pc = self.popStack();
+            },
+
+            Opcode.JP_a16 => self.jump(self.readProgramMemory(u16)),
+            Opcode.JP_HL => self.jump(self.hl),
+            Opcode.JP_Z_a16 => {
+                if (self.getFlags().zero) self.jump(self.readProgramMemory(u16)) else self.pc += 2;
+            },
+            Opcode.JP_C_a16 => {
+                if (self.getFlags().carry) self.pc = self.readProgramMemory(u16) else self.pc += 2;
+            },
+            Opcode.JP_NZ_a16 => {
+                if (!self.getFlags().zero) self.pc = self.readProgramMemory(u16) else self.pc += 2;
+            },
+            Opcode.JP_NC_a16 => {
+                if (!self.getFlags().carry) self.pc = self.readProgramMemory(u16) else self.pc += 2;
+            },
+            Opcode.ADD_A_n8 => {
+                self.setA(self.add8(self.a(), self.readProgramMemory(u8)));
+                self.pc += 1;
+            },
+            Opcode.ADC_A_n8 => {
+                self.setA(self.add8c(self.a(), self.readProgramMemory(u8)));
+                self.pc += 1;
+            },
+            Opcode.SUB_A_n8 => {
+                self.setA(self.sub8(self.a(), self.readProgramMemory(u8)));
+                self.pc += 1;
+            },
+            Opcode.SBC_A_n8 => {
+                self.setA(self.sub8c(self.a(), self.readProgramMemory(u8)));
+                self.pc += 1;
+            },
+            Opcode.AND_A_n8 => {
+                self.setA(self.and8(self.a(), self.readProgramMemory(u8)));
+                self.pc += 1;
+            },
+            Opcode.OR_A_n8 => {
+                self.setA(self.or8(self.a(), self.readProgramMemory(u8)));
+                self.pc += 1;
+            },
+            Opcode.XOR_A_n8 => {
+                self.setA(self.xor8(self.a(), self.readProgramMemory(u8)));
+                self.pc += 1;
+            },
+            Opcode.CP_A_n8 => {
+                _ = self.sub8(self.a(), self.readProgramMemory(u8));
+                self.pc += 1;
+            },
+
+            Opcode.RST_00 => self.callAddr(0),
+            Opcode.RST_08 => self.callAddr(8),
+            Opcode.RST_10 => self.callAddr(0x10),
+            Opcode.RST_18 => self.callAddr(0x18),
+            Opcode.RST_20 => self.callAddr(0x20),
+            Opcode.RST_28 => self.callAddr(0x28),
+            Opcode.RST_30 => self.callAddr(0x30),
+            Opcode.RST_38 => self.callAddr(0x38),
         }
+
+        return duration;
+    }
+
+    fn popStack(self: *Self) u16 {
+        self.sp += 2;
+        return self.readMemory(u16, self.sp - 2);
+    }
+
+    fn pushStack(self: *Self, val: u16) void {
+        self.sp -= 2;
+        self.writeMemory(u16, self.sp, val);
+    }
+
+    fn call(self: *Self) void {
+        self.pushStack(self.pc + 2);
+        self.jump(self.readProgramMemory(u16));
+    }
+
+    fn callAddr(self: *Self, addr: u16) void {
+        self.pushStack(self.pc);
+        self.jump(addr);
+    }
+
+    fn jump(self: *Self, val: u16) void {
+        self.pc = val;
     }
 
     fn inc8(self: *Self, reg: u8) u8 {
@@ -396,7 +715,7 @@ pub const CPU = struct {
 
         for (0..size) |i| {
             const byte: u8 = @truncate(val / std.math.pow(T, 2, @truncate(i * 8)));
-            self.memory.write(addr + @as(u16, @truncate(i)), byte);
+            self.memory[addr + @as(u16, @truncate(i))] = byte;
         }
     }
 
@@ -405,9 +724,11 @@ pub const CPU = struct {
 
         var value: T = 0;
         for (0..size) |i| {
-            const byte = self.memory.read(addr + @as(u16, @truncate(i)));
+            const ad = addr + @as(u16, @truncate(i));
+            const byte = self.memory[ad];
             value += byte * std.math.pow(T, 2, @truncate(i * 8));
         }
+
         return value;
     }
 
@@ -498,9 +819,9 @@ pub const CPU = struct {
     fn jumpRelative(self: *Self) void {
         const val = self.readProgramMemory(u8);
         if (val & 0x80 == 0x80) {
-            self.pc -= 256;
+            self.pc -%= 256;
         }
-        self.pc += val;
+        self.pc +%= val;
     }
 
     fn add16(self: *Self, reg: u16, val: u16) u16 {
@@ -581,7 +902,7 @@ pub const CPU = struct {
     }
 };
 
-pub fn new() CPU {
+pub fn new(memory: *[0x10000]u8) CPU {
     return CPU{
         .af = 0,
         .bc = 0,
@@ -589,6 +910,8 @@ pub fn new() CPU {
         .hl = 0,
         .sp = 0,
         .pc = 0,
+        .ime = false,
+        .memory = memory,
     };
 }
 
@@ -600,17 +923,23 @@ pub const FlagsRegister = packed struct {
     zero: bool,
 };
 
-const Memory = struct {
-    ram: [65536]u8 = [_]u8{0} ** 65536,
+const InterruptRegister = packed struct {
+    vBlank: bool,
+    lcd: bool,
+    timer: bool,
+    serial: bool,
+    joypad: bool,
+    _padding: u3,
 
-    const Self = @This();
-
-    fn read(self: *const Self, ptr: u16) u8 {
-        return self.ram[ptr];
-    }
-
-    fn write(self: *Self, ptr: u16, val: u8) void {
-        self.ram[ptr] = val;
+    fn new() InterruptRegister {
+        return InterruptRegister{
+            .vBlank = false,
+            .lcd = false,
+            .timer = false,
+            .serial = false,
+            .joypad = false,
+            ._padding = 0,
+        };
     }
 };
 
@@ -631,8 +960,8 @@ const CPUTestState = struct {
 
     const Self = @This();
 
-    fn createCPU(self: *const Self) CPU {
-        var cpu = new();
+    fn createCPU(self: *const Self, memory: *[0x10000]u8) CPU {
+        var cpu = new(memory);
         cpu.af = (@as(u16, self.a) << 8) + self.f;
         cpu.bc = (@as(u16, self.b) << 8) + self.c;
         cpu.de = (@as(u16, self.d) << 8) + self.e;
@@ -641,17 +970,27 @@ const CPUTestState = struct {
         cpu.sp = self.sp;
 
         for (self.ram) |cell| {
-            cpu.memory.ram[cell.@"0"] = cell.@"1";
+            cpu.memory[cell.@"0"] = cell.@"1";
         }
 
         return cpu;
     }
 };
 
+fn compareCPUs(alloc: std.mem.Allocator, self: *const CPU, other: *const CPU) !?[]const u8 {
+    if (self.af != other.af) return try std.fmt.allocPrint(alloc, "AF: {d} vs {d}", .{ self.af, other.af });
+    if (self.bc != other.bc) return try std.fmt.allocPrint(alloc, "BC: {d} vs {d}", .{ self.bc, other.bc });
+    if (self.de != other.de) return try std.fmt.allocPrint(alloc, "DE: {d} vs {d}", .{ self.de, other.de });
+    if (self.hl != other.hl) return try std.fmt.allocPrint(alloc, "HL: {d} vs {d}", .{ self.hl, other.hl });
+    if (self.sp != other.sp) return try std.fmt.allocPrint(alloc, "SP: {d} vs {d}", .{ self.sp, other.sp });
+    if (self.pc != other.pc) return try std.fmt.allocPrint(alloc, "PC: {d} vs {d}", .{ self.pc, other.pc });
+    if (!std.mem.eql(u8, self.memory, other.memory)) return "memory";
+    return null;
+}
+
 test "cpu tests" {
     const prefix = "tests/GameboyCPUTests/v2/";
     _ = prefix; // autofix
-    // TODO: 0x09 - 0x39 tests are disabled, because I don't understand the half-carry flag behaviour
     const test_files = [_][]const u8{
         "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "0a", "0b", "0c", "0d", "0e", "0f",
         "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "1a", "1b", "1c", "1d", "1e", "1f",
@@ -665,12 +1004,16 @@ test "cpu tests" {
         "90", "91", "92", "93", "94", "95", "96", "97", "98", "99", "9a", "9b", "9c", "9d", "9e", "9f",
         "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "aa", "ab", "ac", "ad", "ae", "af",
         "b0", "b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8", "b9", "ba", "bb", "bc", "bd", "be", "bf",
+        "c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9", "ca", "cc", "cd", "ce", "cf", "d0",
+        "d1", "d2", "d4", "d5", "d6", "d7", "d8", "d9", "da", "dc", "de", "df", "e0", "e1", "e2", "e5",
+        "e6", "e7", "e8", "e9", "ea", "ee", "ef", "f0", "f1", "f2", "f5", "f6", "f7", "f8", "f9", "fa",
+        "fe", "ff", "cb",
     };
 
     for (test_files) |file| {
         const path = try std.fmt.allocPrint(std.testing.allocator, "tests/GameboyCPUTests/v2/{s}.json", .{file});
         defer std.testing.allocator.free(path);
-        const data = try std.fs.cwd().readFileAlloc(std.testing.allocator, path, 1024000);
+        const data = try std.fs.cwd().readFileAlloc(std.testing.allocator, path, 31457280);
         defer std.testing.allocator.free(data);
 
         const parsed = try std.json.parseFromSlice([]Tests, std.testing.allocator, data, .{});
@@ -679,15 +1022,19 @@ test "cpu tests" {
         for (parsed.value) |t| {
             std.debug.print("Running test {s}...\n", .{t.name});
 
-            var cpu = t.initial.createCPU();
-            const final_cpu = t.final.createCPU();
+            var mem1 = Memory.new();
+            var mem2 = Memory.new();
 
-            try cpu.executeOp();
+            var cpu = t.initial.createCPU(mem1.memoryArray());
+            const final_cpu = t.final.createCPU(mem2.memoryArray());
 
-            std.testing.expectEqual(final_cpu, cpu) catch |err| {
-                std.debug.print("error: {any}", .{err});
-                return err;
-            };
+            _ = try cpu.executeOp();
+
+            if (try compareCPUs(std.testing.allocator, &cpu, &final_cpu)) |err| {
+                std.debug.print("error: {s}\n", .{err});
+                std.testing.allocator.free(err);
+                return error{FAILED}.FAILED;
+            }
         }
     }
 }
