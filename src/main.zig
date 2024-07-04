@@ -1,6 +1,11 @@
 const std = @import("std");
 const cpu = @import("cpu.zig");
 const Memory = @import("memory.zig").Memory;
+const Opcode = @import("opcodes.zig").Opcode;
+const LCD = @import("ppu.zig").LCD;
+const c = @cImport({
+    @cInclude("SDL2/SDL.h");
+});
 
 const print = std.debug.print;
 
@@ -10,7 +15,7 @@ const LOGO = [_]u8{
     0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC, 0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E,
 };
 
-pub fn main() !void {
+pub fn main() !u8 {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer {
         if (gpa.deinit() == .leak) @panic("MEMORY LEAKED!");
@@ -20,18 +25,40 @@ pub fn main() !void {
     const boot_rom = try std.fs.cwd().readFileAlloc(alloc, "gb-bootroms/bin/mgb.bin", 256);
     defer alloc.free(boot_rom);
 
-    var memory = Memory.new();
-    var c = cpu.new(memory.memoryArray());
+    var memory = try Memory.new(alloc);
+    defer memory.deinit();
+    var cp = cpu.new(&memory);
 
-    std.mem.copyForwards(u8, memory.memoryArray(), boot_rom);
-    std.mem.copyForwards(u8, memory.memoryArray()[0x0104..], &LOGO);
+    std.mem.copyForwards(u8, &memory.bank_00, boot_rom);
+    std.mem.copyForwards(u8, memory.bank_00[0x0104..], &LOGO);
 
-    // TODO: allow going instruction by instruction
+    var ev: c.SDL_Event = undefined;
     while (true) {
-        const duration = try c.executeOp();
-        std.debug.print("pc: {d}, op: {x}, dur: {d}\n", .{ c.pc, c.memory[c.pc], duration });
-        if (c.pc == 0x100) {
+        if (cp.pc == 0x100) {
             break;
         }
+
+        const duration = try cp.executeOp();
+        memory.io.timer.tick(duration);
+        memory.ppu.tick(duration);
+
+        while (c.SDL_PollEvent(&ev) == 1) {
+            switch (ev.type) {
+                c.SDL_QUIT => {
+                    return 0;
+                },
+                else => {},
+            }
+        }
     }
+
+    return 0;
+}
+
+fn test_rom(memory: *Memory) !void {
+    try memory.write(0, @intFromEnum(Opcode.JP_a16));
+    try memory.write(0x9800, 1);
+
+    try memory.write(0x9000, 0b00011011);
+    try memory.write(0x9001, 0b00011011);
 }
