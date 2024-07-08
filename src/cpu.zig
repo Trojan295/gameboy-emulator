@@ -65,9 +65,30 @@ pub const CPU = struct {
     }
 
     pub fn executeOp(self: *Self) !usize {
-        const int_flags = self.readMemory(u8, 0xff0f);
-        if (int_flags > 0) {
-            std.debug.print("interrupt!\n", .{});
+        var int_flags = self.readMemory(u8, 0xff0f);
+        const int_enabled = self.readMemory(u8, 0xffff);
+        if (self.ime and (int_flags & int_enabled) > 0) {
+            self.ime = false;
+
+            if (int_flags & 0x01 > 0) {
+                int_flags -= 0x01;
+                try self.callAddr(0x40);
+            } else if (int_flags & 0x02 > 0) {
+                int_flags -= 0x02;
+                try self.callAddr(0x48);
+            } else if (int_flags & 0x04 > 0) {
+                int_flags -= 0x04;
+                try self.callAddr(0x50);
+            } else if (int_flags & 0x08 > 0) {
+                int_flags -= 0x08;
+                try self.callAddr(0x58);
+            } else if (int_flags & 0x10 > 0) {
+                int_flags -= 0x10;
+                try self.callAddr(0x60);
+            }
+
+            try self.writeMemory(u8, 0xff0f, int_flags);
+            return 20;
         }
 
         const opcode_byte = self.readProgramMemory(u8);
@@ -327,7 +348,7 @@ pub const CPU = struct {
             Opcode.ADD_HL_HL => self.hl = self.add16(self.hl, self.hl),
             Opcode.ADD_HL_SP => self.hl = self.add16(self.hl, self.sp),
 
-            Opcode.INC_BC => self.bc += 1,
+            Opcode.INC_BC => self.bc +%= 1,
             Opcode.INC_DE => self.de += 1,
             Opcode.INC_HL => self.hl += 1,
             Opcode.INC_SP => self.sp += 1,
@@ -497,7 +518,9 @@ pub const CPU = struct {
             },
             Opcode.LD_SP_HL => self.sp = self.hl,
 
-            Opcode.DI => {},
+            Opcode.DI => {
+                self.ime = false;
+            },
             Opcode.EI => {
                 self.ime = true;
             },

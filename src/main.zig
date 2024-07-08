@@ -22,30 +22,90 @@ pub fn main() !u8 {
     }
     const alloc = gpa.allocator();
 
+    var args = std.process.args();
+    _ = args.skip();
+    const rom = args.next().?;
+
     const boot_rom = try std.fs.cwd().readFileAlloc(alloc, "gb-bootroms/bin/mgb.bin", 256);
     defer alloc.free(boot_rom);
 
+    const cartridge = try std.fs.cwd().readFileAlloc(alloc, rom, 32 * 1024);
+    defer alloc.free(cartridge);
+
     var memory = try Memory.new(alloc);
     defer memory.deinit();
+
+    const joypad = memory.joypad;
+
     var cp = cpu.new(&memory);
 
     std.mem.copyForwards(u8, &memory.bank_00, boot_rom);
-    std.mem.copyForwards(u8, memory.bank_00[0x0104..], &LOGO);
+
+    for (0x100.., cartridge[0x100..]) |pos, val| {
+        try memory.write(@intCast(pos), val);
+    }
 
     var ev: c.SDL_Event = undefined;
-    while (true) {
-        if (cp.pc == 0x100) {
-            break;
-        }
+    var debug = false;
 
-        const duration = try cp.executeOp();
-        memory.io.timer.tick(duration);
-        memory.ppu.tick(duration);
+    while (true) {
+        var cycles: usize = 0;
+        for (0..100) |_| {
+            if (debug) {
+                const opcode: Opcode = @enumFromInt(memory.read(cp.pc));
+                std.debug.print("pc: {x}, op: {any}\n", .{ cp.pc, opcode });
+            }
+
+            const duration = try cp.executeOp();
+            memory.io.timer.tick(duration);
+            try memory.ppu.tick(duration);
+
+            cycles += duration;
+
+            if (cycles > 1000) {
+                cycles -= 1000;
+                std.time.sleep(10);
+            }
+
+            if (cp.pc == 0x100) {
+                for (0..0x100) |addr| {
+                    try memory.write(@intCast(addr), cartridge[addr]);
+                }
+            }
+        }
 
         while (c.SDL_PollEvent(&ev) == 1) {
             switch (ev.type) {
                 c.SDL_QUIT => {
                     return 0;
+                },
+                c.SDL_KEYDOWN => {
+                    switch (ev.key.keysym.scancode) {
+                        c.SDL_SCANCODE_P => debug = !debug,
+                        c.SDL_SCANCODE_A => joypad.left = false,
+                        c.SDL_SCANCODE_D => joypad.right = false,
+                        c.SDL_SCANCODE_W => joypad.up = false,
+                        c.SDL_SCANCODE_S => joypad.down = false,
+                        c.SDL_SCANCODE_K => joypad.a = false,
+                        c.SDL_SCANCODE_L => joypad.b = false,
+                        c.SDL_SCANCODE_SPACE => joypad.start = false,
+                        c.SDL_SCANCODE_RETURN => joypad.select = false,
+                        else => {},
+                    }
+                },
+                c.SDL_KEYUP => {
+                    switch (ev.key.keysym.scancode) {
+                        c.SDL_SCANCODE_P => debug = !debug,
+                        c.SDL_SCANCODE_A => joypad.left = true,
+                        c.SDL_SCANCODE_D => joypad.right = true,
+                        c.SDL_SCANCODE_W => joypad.up = true,
+                        c.SDL_SCANCODE_S => joypad.down = true,
+                        c.SDL_SCANCODE_K => joypad.a = true,
+                        c.SDL_SCANCODE_L => joypad.b = true,
+                        c.SDL_SCANCODE_SPACE => joypad.start = true,
+                        c.SDL_SCANCODE_RETURN => joypad.select = true,
+                        else => {},
+                    }
                 },
                 else => {},
             }

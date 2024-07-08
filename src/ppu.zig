@@ -28,6 +28,18 @@ const LCDCRegister = packed struct {
     lcd_enable: bool,
 };
 
+const Sprite = packed struct {
+    y: u8,
+    x: u8,
+    tile_idx: u8,
+    cgb_palette: u3,
+    bank: u1,
+    dmg_palette: u1,
+    x_flip: bool,
+    y_flip: bool,
+    priority: bool,
+};
+
 pub const PPU = struct {
     alloc: std.mem.Allocator,
 
@@ -48,21 +60,28 @@ pub const PPU = struct {
 
     cycles: usize,
     scanline_cycles: usize,
+    sprite_buffer: std.ArrayList(Sprite),
 
     lx: u8,
     window_line_counter: u8,
+    line_buffer: [160]u2,
 
     lcd: *LCD,
 
+    vblank_interrupt: *bool,
+
     const Self = @This();
 
-    pub fn new(alloc: std.mem.Allocator) !*PPU {
+    pub fn new(alloc: std.mem.Allocator, vblank_interrupt: *bool) !*PPU {
         const ptr = try alloc.create(PPU);
         ptr.* = PPU{
             .alloc = alloc,
+            .vblank_interrupt = vblank_interrupt,
             .lcd = try LCD.new(alloc),
             .oam = undefined,
             .vram = undefined,
+            .sprite_buffer = std.ArrayList(Sprite).init(alloc),
+            .line_buffer = undefined,
             .stat = STATRegister{
                 .mode = 3,
                 ._n = 0,
@@ -101,6 +120,7 @@ pub const PPU = struct {
 
     pub fn deinit(self: *Self) void {
         self.lcd.deinit();
+        self.sprite_buffer.deinit();
         self.alloc.destroy(self);
     }
 
@@ -112,12 +132,17 @@ pub const PPU = struct {
             0xFF41 => self.stat = @bitCast(val & 0x78),
             0xFF42 => self.scy = val,
             0xFF43 => self.scx = val,
+            0xFF44 => self.ly = val,
+            0xFF45 => self.lyc = val,
             0xFF47 => self.bgp = val,
             0xFF48 => self.obp0 = val,
             0xFF49 => self.obp1 = val,
             0xFF4A => self.wy = val,
             0xFF4B => self.wx = val,
-            else => return MemoryError.WriteNotAllowed,
+            else => {
+                std.log.debug("ppu write: {x}\n", .{addr});
+                return MemoryError.WriteNotAllowed;
+            },
         }
     }
 
@@ -137,7 +162,41 @@ pub const PPU = struct {
         };
     }
 
-    pub fn tick(self: *Self, ticks: usize) void {
+    fn load_sprite_buffer(self: *Self) !void {
+        self.sprite_buffer.clearRetainingCapacity();
+
+        for (0..40) |i| {
+            const sprite_data = self.oam[4 * i .. 4 * i + 4];
+            const sprite = std.mem.bytesAsValue(Sprite, sprite_data);
+
+            const sprite_height: u8 = if (self.lcdc.obj_size) 16 else 8;
+
+            if (sprite.x > 0 and (self.ly + 16) >= sprite.y and (self.ly + 16) < sprite.y + sprite_height and self.sprite_buffer.items.len < 10) {
+                try self.sprite_buffer.append(sprite.*);
+            }
+        }
+    }
+
+    fn get_pixels(self: *Self, buf: []u2, tile_addr: u16) void {
+        const low = self.read(tile_addr);
+        const high = self.read(tile_addr + 1);
+
+        for (0..8) |i| {
+            const exp: u3 = @truncate(i);
+            const mask = std.math.pow(u8, 2, 7 - exp);
+            var val: u2 = 0;
+            if (high & mask == mask) {
+                val += 2;
+            }
+            if (low & mask == mask) {
+                val += 1;
+            }
+
+            buf[i] = val;
+        }
+    }
+
+    pub fn tick(self: *Self, ticks: usize) !void {
         self.scanline_cycles += ticks;
 
         switch (self.stat.mode) {
@@ -146,6 +205,9 @@ pub const PPU = struct {
                 if (self.cycles >= 80) {
                     self.cycles -= 80;
                     self.scanline_cycles -= 80;
+
+                    try self.load_sprite_buffer();
+
                     self.stat.mode = 3;
                 }
             },
@@ -164,7 +226,8 @@ pub const PPU = struct {
                         offset += ((self.scx + self.lx) / 8) & 0x1F;
                         offset += 32 * (((@as(u16, self.ly) + @as(u16, self.scy)) & 0xFF) / 8);
                     } else {
-                        offset += 32 * self.window_line_counter;
+                        offset += ((self.scx) / 8) & 0x1F;
+                        offset += 32 * (self.window_line_counter / 8);
                         self.window_line_counter += 1;
                     }
 
@@ -177,51 +240,47 @@ pub const PPU = struct {
                         tile_data_addr = 0x8000 + 16 * @as(u16, tile_number);
                     } else {
                         tile_data_addr = 0x9000;
-                        tile_data_addr += 16 * ((tile_number ^ 0x80) - 128);
+                        tile_data_addr += 16 * ((@as(u16, tile_number) ^ 0x80));
+                        tile_data_addr -= 16 * 128;
                     }
 
                     tile_data_addr += 2 * ((@as(u16, self.ly) + @as(u16, self.scy)) % 8);
 
-                    const low = self.read(tile_data_addr);
-                    const high = self.read(tile_data_addr + 1);
-
-                    for (0..8) |i| {
-                        const exp: u3 = @truncate(i);
-                        const mask = std.math.pow(u8, 2, 7 - exp);
-                        var val: u2 = 0;
-                        if (high & mask == mask) {
-                            val += 2;
-                        }
-                        if (low & mask == mask) {
-                            val += 1;
-                        }
-
-                        self.lcd.push_pixel(val);
-                    }
+                    self.get_pixels(self.line_buffer[self.lx..], tile_data_addr);
 
                     self.lx += 8;
                     if (self.lx == 160) {
                         self.cycles = 0;
                         self.lx = 0;
                         self.stat.mode = 0;
+
+                        for (self.sprite_buffer.items) |sprite| {
+                            const sprite_tile_addr = self.getSpriteTileAddr(sprite.tile_idx) + 2 * ((@as(u16, self.ly) + @as(u16, self.scy)) % 8);
+                            self.get_pixels(self.line_buffer[sprite.x - 8 ..], sprite_tile_addr);
+                        }
+
+                        for (self.line_buffer) |val| {
+                            self.lcd.push_pixel(val);
+                        }
                     }
                 }
             },
             0 => {
-                if (self.scanline_cycles > 456) {
+                if (self.scanline_cycles >= 456) {
                     self.scanline_cycles -= 456;
 
-                    self.ly += 1;
+                    self.ly +%= 1;
                     if (self.ly < 144) {
                         self.stat.mode = 2;
                     } else {
                         self.lcd.render();
                         self.stat.mode = 1;
+                        self.vblank_interrupt.* = true;
                     }
                 }
             },
             1 => {
-                if (self.scanline_cycles > 456) {
+                if (self.scanline_cycles >= 456) {
                     self.scanline_cycles -= 456;
                     self.ly += 1;
                     if (self.ly > 153) {
@@ -231,7 +290,12 @@ pub const PPU = struct {
                 }
             },
         }
+
         self.stat.lyc_eq_ly = self.ly == self.lyc;
+    }
+
+    fn getSpriteTileAddr(_: *Self, tile_nr: u8) u16 {
+        return 0x8000 + 16 * @as(u16, tile_nr);
     }
 };
 

@@ -16,6 +16,7 @@ pub const Memory = struct {
     interrupt_enable: u8,
 
     ppu: *PPU,
+    joypad: *Joypad,
 
     alloc: std.mem.Allocator,
 
@@ -25,7 +26,9 @@ pub const Memory = struct {
         const timer: *Timer = try alloc.create(Timer);
         const interrupts: *Interrupts = try alloc.create(Interrupts);
         const io: *IORegisters = try alloc.create(IORegisters);
-        const ppu: *PPU = try PPU.new(alloc);
+        const ppu: *PPU = try PPU.new(alloc, &interrupts.vblank);
+        const joypad: *Joypad = try alloc.create(Joypad);
+        joypad.* = Joypad.new();
 
         interrupts.* = Interrupts.new();
         timer.* = Timer.new(&interrupts.timer);
@@ -48,6 +51,7 @@ pub const Memory = struct {
             .interrupt_enable = 0,
 
             .ppu = ppu,
+            .joypad = joypad,
         };
 
         return mem;
@@ -58,6 +62,7 @@ pub const Memory = struct {
         self.alloc.destroy(self.io.timer);
         self.alloc.destroy(self.io.interrupts);
         self.alloc.destroy(self.io);
+        self.alloc.destroy(self.joypad);
     }
 
     pub fn read(self: *Self, addr: u16) u8 {
@@ -70,8 +75,9 @@ pub const Memory = struct {
             0xe000...0xfdff => self.work_ram[addr - 0xe000], // Echo RAM of Work RAM
             0xfe00...0xfe9f => self.ppu.read(addr),
             0xfea0...0xfeff => 0,
-            0xff00...0xff03 => 0, // TODO: implement
-            0xff04...0xff07 => 0, //self.io.timer.read(addr),
+            0xff00 => self.joypad.read(),
+            0xff01...0xff03 => 0x0f, // TODO: implement
+            0xff04...0xff07 => self.io.timer.read(addr),
             0xff08...0xff0e => 0, // TODO: implement
             0xff0f => self.io.interrupts.read(),
             0xff10...0xff3f => 0, // TODO: implement
@@ -83,24 +89,34 @@ pub const Memory = struct {
     }
 
     pub fn write(self: *Self, addr: u16, val: u8) !void {
-        switch (addr) {
+        try switch (addr) {
             0x0000...0x3fff => self.bank_00[addr] = val,
             0x4000...0x7fff => self.bank_nn[addr - 0x4000] = val,
-            0x8000...0x9fff => try self.ppu.write(addr, val),
+            0x8000...0x9fff => self.ppu.write(addr, val),
             0xa000...0xbfff => self.ext_ram[addr - 0xa000] = val,
             0xc000...0xdfff => self.work_ram[addr - 0xc000] = val,
             0xe000...0xfdff => self.work_ram[addr - 0xe000] = val, // Echo RAM of Work RAM
             0xfe00...0xfe9f => try self.ppu.write(addr, val),
             0xfea0...0xfeff => {},
-            0xff00...0xff03 => {}, // TODO: implement
+            0xff00 => self.joypad.write(val),
+            0xff01...0xff03 => {}, // TODO: implement
             0xff04...0xff07 => try self.io.timer.write(addr, val),
             0xff08...0xff0e => {}, // TODO: implement
             0xff0f => self.io.interrupts.write(val),
             0xff10...0xff3f => {}, // TODO: implement
-            0xff40...0xff4b => try self.ppu.write(addr, val),
+            0xff40...0xff45 => try self.ppu.write(addr, val),
+            0xff46 => try self.dma_oam_transfer(val),
+            0xff47...0xff4b => try self.ppu.write(addr, val),
             0xff4c...0xff7f => {}, // TODO: implement
             0xff80...0xfffe => self.high_ram[addr - 0xff80] = val,
             0xffff => self.interrupt_enable = val,
+        };
+    }
+
+    pub fn dma_oam_transfer(self: *Self, val: u8) MemoryError!void {
+        const start_addr = @as(u16, val) * 0x100;
+        for (start_addr.., 0xfe00..0xfe9f) |src, dst| {
+            try self.write(@intCast(dst), self.read(@intCast(src)));
         }
     }
 };
@@ -148,7 +164,63 @@ const Interrupts = struct {
     }
 };
 
-const Joypad = extern struct { input: u8 };
+pub const Joypad = struct {
+    select_buttons: bool,
+    select_dpad: bool,
+
+    up: bool,
+    down: bool,
+    left: bool,
+    right: bool,
+    a: bool,
+    b: bool,
+    start: bool,
+    select: bool,
+
+    const Self = @This();
+
+    pub fn new() Joypad {
+        return Joypad{
+            .select_buttons = false,
+            .select_dpad = false,
+            .up = true,
+            .down = true,
+            .left = true,
+            .right = true,
+            .a = true,
+            .b = true,
+            .start = true,
+            .select = true,
+        };
+    }
+
+    pub fn write(self: *Self, val: u8) void {
+        self.select_buttons = (val & 0x20) == 0x20;
+        self.select_dpad = (val & 0x10) == 0x10;
+    }
+
+    pub fn read(self: *Self) u8 {
+        var val: u8 = 0;
+        val += if (self.select_buttons) 0x20 else 0;
+        val += if (self.select_dpad) 0x10 else 0;
+
+        if (!self.select_buttons) {
+            val += if (self.start) 8 else 0;
+            val += if (self.select) 4 else 0;
+            val += if (self.b) 2 else 0;
+            val += if (self.a) 1 else 0;
+        } else if (!self.select_dpad) {
+            val += if (self.down) 8 else 0;
+            val += if (self.up) 4 else 0;
+            val += if (self.left) 2 else 0;
+            val += if (self.right) 1 else 0;
+        } else {
+            val += 0xf;
+        }
+
+        return val;
+    }
+};
 
 const Serial = extern struct {
     sb: u8,
@@ -220,6 +292,8 @@ const Timer = struct {
     }
 
     fn read(self: *Self, addr: u16) u8 {
+        std.debug.print("{x}\n", .{self.div});
+
         return switch (addr) {
             0xff04 => self.div,
             0xff05 => self.tima,
