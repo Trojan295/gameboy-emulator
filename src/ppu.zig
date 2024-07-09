@@ -63,20 +63,21 @@ pub const PPU = struct {
     sprite_buffer: std.ArrayList(Sprite),
 
     lx: u8,
-    window_line_counter: u8,
     line_buffer: [160]u2,
 
     lcd: *LCD,
 
     vblank_interrupt: *bool,
+    stat_interrupt: *bool,
 
     const Self = @This();
 
-    pub fn new(alloc: std.mem.Allocator, vblank_interrupt: *bool) !*PPU {
+    pub fn new(alloc: std.mem.Allocator, vblank_interrupt: *bool, stat_interrupt: *bool) !*PPU {
         const ptr = try alloc.create(PPU);
         ptr.* = PPU{
             .alloc = alloc,
             .vblank_interrupt = vblank_interrupt,
+            .stat_interrupt = stat_interrupt,
             .lcd = try LCD.new(alloc),
             .oam = undefined,
             .vram = undefined,
@@ -113,7 +114,6 @@ pub const PPU = struct {
             .cycles = 0,
             .scanline_cycles = 0,
             .lx = 0,
-            .window_line_counter = 0,
         };
         return ptr;
     }
@@ -177,13 +177,45 @@ pub const PPU = struct {
         }
     }
 
-    fn get_pixels(self: *Self, buf: []u2, tile_addr: u16) void {
+    fn getPixels(self: *Self, buf: []u2, tile_addr: u16) void {
         const low = self.read(tile_addr);
         const high = self.read(tile_addr + 1);
 
         for (0..8) |i| {
             const exp: u3 = @truncate(i);
             const mask = std.math.pow(u8, 2, 7 - exp);
+            var val: u2 = 0;
+            if (high & mask == mask) {
+                val += 2;
+            }
+            if (low & mask == mask) {
+                val += 1;
+            }
+
+            buf[i] = val;
+        }
+    }
+
+    fn getSpritePixels(self: *Self, buf: []u2, sprite: *const Sprite) void {
+        const offset = 2 * ((@as(u16, self.ly) + @as(u16, self.scy)) % 8);
+        var tile_addr = self.getSpriteTileAddr(sprite.tile_idx);
+        if (sprite.y_flip) {
+            tile_addr += 16 - offset;
+        } else {
+            tile_addr += offset;
+        }
+
+        const low = self.read(tile_addr);
+        const high = self.read(tile_addr + 1);
+
+        for (0..8) |i| {
+            if (i >= buf.len) {
+                break;
+            }
+
+            const exp: u3 = @truncate(i);
+
+            const mask = if (sprite.x_flip) std.math.pow(u8, 2, exp) else std.math.pow(u8, 2, 7 - exp);
             var val: u2 = 0;
             if (high & mask == mask) {
                 val += 2;
@@ -204,7 +236,6 @@ pub const PPU = struct {
                 self.cycles += ticks;
                 if (self.cycles >= 80) {
                     self.cycles -= 80;
-                    self.scanline_cycles -= 80;
 
                     try self.load_sprite_buffer();
 
@@ -215,20 +246,20 @@ pub const PPU = struct {
                 self.cycles += ticks;
                 while (self.cycles >= 2) {
                     self.cycles -= 2;
-                    self.scanline_cycles -= 2;
 
-                    const is_window = self.lcdc.window_enable and self.wy == self.ly and self.lx > self.wx - 7;
+                    const adj_wx = if (self.wx < 7) 0 else self.wx - 7;
+
+                    const is_window = self.lcdc.window_enable and self.wy <= self.ly and self.lx > adj_wx;
 
                     var tile_addr: u16 = if ((self.lcdc.bg_window_tile_map and !is_window) or (self.lcdc.window_tile_map and is_window)) 0x9c00 else 0x9800;
                     var offset: u16 = 0;
 
                     if (!is_window) {
-                        offset += ((self.scx + self.lx) / 8) & 0x1F;
+                        offset += ((@as(u16, self.scx) + @as(u16, self.lx)) / 8) & 0x1F;
                         offset += 32 * (((@as(u16, self.ly) + @as(u16, self.scy)) & 0xFF) / 8);
                     } else {
-                        offset += ((self.scx) / 8) & 0x1F;
-                        offset += 32 * (self.window_line_counter / 8);
-                        self.window_line_counter += 1;
+                        offset += ((self.lx) / 8) & 0x1F;
+                        offset += 32 * ((self.ly - self.wy) / 8);
                     }
 
                     tile_addr += offset;
@@ -246,7 +277,7 @@ pub const PPU = struct {
 
                     tile_data_addr += 2 * ((@as(u16, self.ly) + @as(u16, self.scy)) % 8);
 
-                    self.get_pixels(self.line_buffer[self.lx..], tile_data_addr);
+                    self.getPixels(self.line_buffer[self.lx..], tile_data_addr);
 
                     self.lx += 8;
                     if (self.lx == 160) {
@@ -254,9 +285,15 @@ pub const PPU = struct {
                         self.lx = 0;
                         self.stat.mode = 0;
 
+                        if (self.stat.mode0_int) {
+                            self.stat_interrupt.* = true;
+                        }
+
                         for (self.sprite_buffer.items) |sprite| {
-                            const sprite_tile_addr = self.getSpriteTileAddr(sprite.tile_idx) + 2 * ((@as(u16, self.ly) + @as(u16, self.scy)) % 8);
-                            self.get_pixels(self.line_buffer[sprite.x - 8 ..], sprite_tile_addr);
+                            if (sprite.x >= 168 or sprite.x < 8) {
+                                continue;
+                            }
+                            self.getSpritePixels(self.line_buffer[sprite.x - 8 ..], &sprite);
                         }
 
                         for (self.line_buffer) |val| {
@@ -272,10 +309,16 @@ pub const PPU = struct {
                     self.ly +%= 1;
                     if (self.ly < 144) {
                         self.stat.mode = 2;
+                        if (self.stat.mode2_int) {
+                            self.stat_interrupt.* = true;
+                        }
                     } else {
                         self.lcd.render();
                         self.stat.mode = 1;
                         self.vblank_interrupt.* = true;
+                        if (self.stat.mode1_int) {
+                            self.stat_interrupt.* = true;
+                        }
                     }
                 }
             },
@@ -286,12 +329,19 @@ pub const PPU = struct {
                     if (self.ly > 153) {
                         self.ly = 0;
                         self.stat.mode = 2;
+                        if (self.stat.mode2_int) {
+                            self.stat_interrupt.* = true;
+                        }
                     }
                 }
             },
         }
 
+        const old_lyc_eq_ly = self.stat.lyc_eq_ly;
         self.stat.lyc_eq_ly = self.ly == self.lyc;
+        if (!old_lyc_eq_ly and self.stat.lyc_eq_ly and self.stat.lyc_int) {
+            self.stat_interrupt.* = true;
+        }
     }
 
     fn getSpriteTileAddr(_: *Self, tile_nr: u8) u16 {
@@ -379,10 +429,18 @@ pub const LCD = struct {
 };
 
 test "ppu" {
-    const ppu = try PPU.new(std.testing.allocator);
+    var int = false;
+
+    const ppu = try PPU.new(std.testing.allocator, &int, &int);
     defer ppu.deinit();
 
-    ppu.tick(100);
+    try ppu.tick(100);
+}
 
-    std.debug.print("{any}", .{ppu});
+test "sprite_cast" {
+    const data = [_]u8{ 255, 254, 160, 7 };
+    const sprite = std.mem.bytesAsValue(Sprite, &data);
+    try std.testing.expectEqual(255, sprite.y);
+    try std.testing.expectEqual(254, sprite.x);
+    try std.testing.expectEqual(160, sprite.tile_idx);
 }

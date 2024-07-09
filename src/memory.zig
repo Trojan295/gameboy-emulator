@@ -1,14 +1,12 @@
 const std = @import("std");
 const PPU = @import("ppu.zig").PPU;
+const Cartridge = @import("mbc.zig").MBC1;
 
 const MemoryError = error{
     WriteNotAllowed,
 };
 
 pub const Memory = struct {
-    bank_00: [16384]u8,
-    bank_nn: [16384]u8,
-    ext_ram: [8192]u8,
     work_ram: [8192]u8,
     _nu: [96]u8,
     io: *IORegisters,
@@ -17,20 +15,18 @@ pub const Memory = struct {
 
     ppu: *PPU,
     joypad: *Joypad,
+    cartridge: *Cartridge,
 
     alloc: std.mem.Allocator,
 
     const Self = @This();
 
-    pub fn new(alloc: std.mem.Allocator) !Self {
+    pub fn new(alloc: std.mem.Allocator, cartridge: *Cartridge) !Self {
         const timer: *Timer = try alloc.create(Timer);
         const interrupts: *Interrupts = try alloc.create(Interrupts);
         const io: *IORegisters = try alloc.create(IORegisters);
-        const ppu: *PPU = try PPU.new(alloc, &interrupts.vblank);
-        const joypad: *Joypad = try alloc.create(Joypad);
-        joypad.* = Joypad.new();
-
         interrupts.* = Interrupts.new();
+
         timer.* = Timer.new(&interrupts.timer);
 
         io.* = IORegisters{
@@ -38,12 +34,13 @@ pub const Memory = struct {
             .interrupts = interrupts,
         };
 
+        const ppu: *PPU = try PPU.new(alloc, &interrupts.vblank, &interrupts.lcd);
+        const joypad: *Joypad = try alloc.create(Joypad);
+        joypad.* = Joypad.new();
+
         const mem = Memory{
             .alloc = alloc,
 
-            .bank_00 = [_]u8{0} ** 16384,
-            .bank_nn = [_]u8{0} ** 16384,
-            .ext_ram = [_]u8{0} ** 8192,
             .work_ram = [_]u8{0} ** 8192,
             ._nu = [_]u8{0} ** 96,
             .io = io,
@@ -52,6 +49,7 @@ pub const Memory = struct {
 
             .ppu = ppu,
             .joypad = joypad,
+            .cartridge = cartridge,
         };
 
         return mem;
@@ -67,10 +65,10 @@ pub const Memory = struct {
 
     pub fn read(self: *Self, addr: u16) u8 {
         return switch (addr) {
-            0x0000...0x3fff => self.bank_00[addr],
-            0x4000...0x7fff => self.bank_nn[addr - 0x4000],
+            0x0000...0x3fff => self.cartridge.read(addr),
+            0x4000...0x7fff => self.cartridge.read(addr),
             0x8000...0x9fff => self.ppu.read(addr),
-            0xa000...0xbfff => self.ext_ram[addr - 0xa000],
+            0xa000...0xbfff => self.cartridge.read(addr),
             0xc000...0xdfff => self.work_ram[addr - 0xc000],
             0xe000...0xfdff => self.work_ram[addr - 0xe000], // Echo RAM of Work RAM
             0xfe00...0xfe9f => self.ppu.read(addr),
@@ -90,10 +88,10 @@ pub const Memory = struct {
 
     pub fn write(self: *Self, addr: u16, val: u8) !void {
         try switch (addr) {
-            0x0000...0x3fff => self.bank_00[addr] = val,
-            0x4000...0x7fff => self.bank_nn[addr - 0x4000] = val,
+            0x0000...0x3fff => self.cartridge.write(addr, val),
+            0x4000...0x7fff => self.cartridge.write(addr, val),
             0x8000...0x9fff => self.ppu.write(addr, val),
-            0xa000...0xbfff => self.ext_ram[addr - 0xa000] = val,
+            0xa000...0xbfff => self.cartridge.write(addr, val),
             0xc000...0xdfff => self.work_ram[addr - 0xc000] = val,
             0xe000...0xfdff => self.work_ram[addr - 0xe000] = val, // Echo RAM of Work RAM
             0xfe00...0xfe9f => try self.ppu.write(addr, val),
@@ -109,7 +107,9 @@ pub const Memory = struct {
             0xff47...0xff4b => try self.ppu.write(addr, val),
             0xff4c...0xff7f => {}, // TODO: implement
             0xff80...0xfffe => self.high_ram[addr - 0xff80] = val,
-            0xffff => self.interrupt_enable = val,
+            0xffff => {
+                self.interrupt_enable = val;
+            },
         };
     }
 
@@ -292,8 +292,6 @@ const Timer = struct {
     }
 
     fn read(self: *Self, addr: u16) u8 {
-        std.debug.print("{x}\n", .{self.div});
-
         return switch (addr) {
             0xff04 => self.div,
             0xff05 => self.tima,

@@ -3,6 +3,7 @@ const cpu = @import("cpu.zig");
 const Memory = @import("memory.zig").Memory;
 const Opcode = @import("opcodes.zig").Opcode;
 const LCD = @import("ppu.zig").LCD;
+const Cartridge = @import("mbc.zig").MBC1;
 const c = @cImport({
     @cInclude("SDL2/SDL.h");
 });
@@ -29,21 +30,18 @@ pub fn main() !u8 {
     const boot_rom = try std.fs.cwd().readFileAlloc(alloc, "gb-bootroms/bin/mgb.bin", 256);
     defer alloc.free(boot_rom);
 
-    const cartridge = try std.fs.cwd().readFileAlloc(alloc, rom, 32 * 1024);
-    defer alloc.free(cartridge);
+    const cartridge_data = try std.fs.cwd().readFileAlloc(alloc, rom, 64 * 1024);
+    defer alloc.free(cartridge_data);
 
-    var memory = try Memory.new(alloc);
+    var cartridge = Cartridge.new(cartridge_data);
+
+    var memory = try Memory.new(alloc, &cartridge);
     defer memory.deinit();
 
     const joypad = memory.joypad;
 
     var cp = cpu.new(&memory);
-
-    std.mem.copyForwards(u8, &memory.bank_00, boot_rom);
-
-    for (0x100.., cartridge[0x100..]) |pos, val| {
-        try memory.write(@intCast(pos), val);
-    }
+    cp.pc = 0x100;
 
     var ev: c.SDL_Event = undefined;
     var debug = false;
@@ -64,13 +62,7 @@ pub fn main() !u8 {
 
             if (cycles > 1000) {
                 cycles -= 1000;
-                std.time.sleep(10);
-            }
-
-            if (cp.pc == 0x100) {
-                for (0..0x100) |addr| {
-                    try memory.write(@intCast(addr), cartridge[addr]);
-                }
+                std.time.sleep(500000);
             }
         }
 
