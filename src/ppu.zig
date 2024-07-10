@@ -21,8 +21,8 @@ const LCDCRegister = packed struct {
     bg_enable: bool,
     obj_enable: bool,
     obj_size: bool,
-    bg_window_tile_map: bool,
-    bg_window_tile_data: bool,
+    bg_tile_map_select: bool,
+    tile_data_select: bool,
     window_enable: bool,
     window_tile_map: bool,
     lcd_enable: bool,
@@ -63,7 +63,6 @@ pub const PPU = struct {
     sprite_buffer: std.ArrayList(Sprite),
 
     lx: u8,
-    line_buffer: [160]u2,
 
     lcd: *LCD,
 
@@ -82,7 +81,6 @@ pub const PPU = struct {
             .oam = undefined,
             .vram = undefined,
             .sprite_buffer = std.ArrayList(Sprite).init(alloc),
-            .line_buffer = undefined,
             .stat = STATRegister{
                 .mode = 3,
                 ._n = 0,
@@ -94,13 +92,13 @@ pub const PPU = struct {
             },
             .lcdc = LCDCRegister{
                 .window_tile_map = false,
-                .bg_window_tile_map = false,
+                .bg_tile_map_select = false,
                 .window_enable = false,
                 .obj_enable = false,
                 .obj_size = false,
                 .bg_enable = false,
                 .lcd_enable = false,
-                .bg_window_tile_data = false,
+                .tile_data_select = false,
             },
             .ly = 0,
             .lyc = 0,
@@ -177,27 +175,9 @@ pub const PPU = struct {
         }
     }
 
-    fn getPixels(self: *Self, buf: []u2, tile_addr: u16) void {
-        const low = self.read(tile_addr);
-        const high = self.read(tile_addr + 1);
-
-        for (0..8) |i| {
-            const exp: u3 = @truncate(i);
-            const mask = std.math.pow(u8, 2, 7 - exp);
-            var val: u2 = 0;
-            if (high & mask == mask) {
-                val += 2;
-            }
-            if (low & mask == mask) {
-                val += 1;
-            }
-
-            buf[i] = val;
-        }
-    }
-
     fn getSpritePixels(self: *Self, buf: []u2, sprite: *const Sprite) void {
-        const offset = 2 * ((@as(u16, self.ly) + @as(u16, self.scy)) % 8);
+        const offset = 2 * ((@as(u16, self.ly) -% @as(u16, sprite.y)) % 8);
+
         var tile_addr = self.getSpriteTileAddr(sprite.tile_idx);
         if (sprite.y_flip) {
             tile_addr += 16 - offset;
@@ -224,6 +204,10 @@ pub const PPU = struct {
                 val += 1;
             }
 
+            if (val == 0) {
+                continue;
+            }
+
             buf[i] = val;
         }
     }
@@ -244,61 +228,77 @@ pub const PPU = struct {
             },
             3 => {
                 self.cycles += ticks;
-                while (self.cycles >= 2) {
-                    self.cycles -= 2;
+                while (self.cycles >= 200) {
+                    self.cycles = 0;
+                    self.stat.mode = 0;
 
-                    const adj_wx = if (self.wx < 7) 0 else self.wx - 7;
+                    var line_buffer: [160]u2 = undefined;
 
-                    const is_window = self.lcdc.window_enable and self.wy <= self.ly and self.lx > adj_wx;
+                    var bg_to_skip: usize = self.scx % 8;
+                    var bg_counter: usize = 0;
 
-                    var tile_addr: u16 = if ((self.lcdc.bg_window_tile_map and !is_window) or (self.lcdc.window_tile_map and is_window)) 0x9c00 else 0x9800;
-                    var offset: u16 = 0;
+                    bg: for (0..21) |i| {
+                        const lx: u16 = @truncate(i);
+                        const x: u16 = ((self.scx / 8) + lx) & 0x1F;
+                        const y: u16 = ((self.scy + self.ly) / 8) & 0xFF;
 
-                    if (!is_window) {
-                        offset += ((@as(u16, self.scx) + @as(u16, self.lx)) / 8) & 0x1F;
-                        offset += 32 * (((@as(u16, self.ly) + @as(u16, self.scy)) & 0xFF) / 8);
-                    } else {
-                        offset += ((self.lx) / 8) & 0x1F;
-                        offset += 32 * ((self.ly - self.wy) / 8);
-                    }
+                        const tile_map_bank: u16 = if (self.lcdc.bg_tile_map_select) 0x9c00 else 0x9800;
+                        const tile_map_addr: u16 = tile_map_bank + y * 32 + x;
+                        const tile_number = self.read(tile_map_addr);
 
-                    tile_addr += offset;
-
-                    const tile_number = self.read(tile_addr);
-
-                    var tile_data_addr: u16 = 0;
-                    if (self.lcdc.bg_window_tile_data) {
-                        tile_data_addr = 0x8000 + 16 * @as(u16, tile_number);
-                    } else {
-                        tile_data_addr = 0x9000;
-                        tile_data_addr += 16 * ((@as(u16, tile_number) ^ 0x80));
-                        tile_data_addr -= 16 * 128;
-                    }
-
-                    tile_data_addr += 2 * ((@as(u16, self.ly) + @as(u16, self.scy)) % 8);
-
-                    self.getPixels(self.line_buffer[self.lx..], tile_data_addr);
-
-                    self.lx += 8;
-                    if (self.lx == 160) {
-                        self.cycles = 0;
-                        self.lx = 0;
-                        self.stat.mode = 0;
-
-                        if (self.stat.mode0_int) {
-                            self.stat_interrupt.* = true;
+                        var tile_data_addr: u16 = 0;
+                        if (self.lcdc.tile_data_select) {
+                            tile_data_addr = 0x8000 + 16 * @as(u16, tile_number);
+                        } else {
+                            tile_data_addr = 0x9000;
+                            tile_data_addr += 16 * ((@as(u16, tile_number) ^ 0x80));
+                            tile_data_addr -= 16 * 128;
                         }
 
-                        for (self.sprite_buffer.items) |sprite| {
-                            if (sprite.x >= 168 or sprite.x < 8) {
+                        tile_data_addr += 2 * ((@as(u16, self.ly) + @as(u16, self.scy)) % 8);
+
+                        const low = self.read(tile_data_addr);
+                        const high = self.read(tile_data_addr + 1);
+
+                        for (0..8) |j| {
+                            if (bg_to_skip > 0) {
+                                bg_to_skip -= 1;
                                 continue;
                             }
-                            self.getSpritePixels(self.line_buffer[sprite.x - 8 ..], &sprite);
-                        }
 
-                        for (self.line_buffer) |val| {
-                            self.lcd.push_pixel(val);
+                            const exp: u3 = @truncate(j);
+                            const mask = std.math.pow(u8, 2, 7 - exp);
+                            var val: u2 = 0;
+                            if (high & mask == mask) {
+                                val += 2;
+                            }
+                            if (low & mask == mask) {
+                                val += 1;
+                            }
+
+                            line_buffer[bg_counter] = val;
+                            bg_counter += 1;
+                            if (bg_counter == 160) {
+                                break :bg;
+                            }
                         }
+                    }
+
+                    // TODO: window fetcher
+
+                    for (self.sprite_buffer.items) |sprite| {
+                        if (sprite.x >= 168 or sprite.x < 8) {
+                            continue;
+                        }
+                        self.getSpritePixels(line_buffer[sprite.x - 8 ..], &sprite);
+                    }
+
+                    for (line_buffer) |val| {
+                        self.lcd.push_pixel(val);
+                    }
+
+                    if (self.stat.mode0_int) {
+                        self.stat_interrupt.* = true;
                     }
                 }
             },
@@ -395,10 +395,10 @@ pub const LCD = struct {
     pub fn render(self: *Self) void {
         for (0..4) |color| {
             assert(switch (color) {
-                0 => c.SDL_SetRenderDrawColor(self.renderer, 0, 0, 0, 0xFF),
-                1 => c.SDL_SetRenderDrawColor(self.renderer, 80, 80, 80, 0xFF),
-                2 => c.SDL_SetRenderDrawColor(self.renderer, 160, 160, 150, 0xFF),
-                3 => c.SDL_SetRenderDrawColor(self.renderer, 255, 255, 255, 0xFF),
+                0 => c.SDL_SetRenderDrawColor(self.renderer, 255, 255, 255, 0xFF),
+                1 => c.SDL_SetRenderDrawColor(self.renderer, 160, 160, 160, 0xFF),
+                2 => c.SDL_SetRenderDrawColor(self.renderer, 80, 80, 80, 0xFF),
+                3 => c.SDL_SetRenderDrawColor(self.renderer, 0, 0, 0, 0xFF),
                 else => 0,
             } == 0);
 

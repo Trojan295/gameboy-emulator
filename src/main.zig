@@ -62,7 +62,7 @@ pub fn main() !u8 {
 
             if (cycles > 1000) {
                 cycles -= 1000;
-                std.time.sleep(500000);
+                std.time.sleep(600000);
             }
         }
 
