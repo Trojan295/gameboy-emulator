@@ -1,20 +1,14 @@
 const std = @import("std");
 const cpu = @import("cpu.zig");
+const mbc = @import("mbc.zig");
 const Memory = @import("memory.zig").Memory;
 const Opcode = @import("opcodes.zig").Opcode;
 const LCD = @import("ppu.zig").LCD;
-const Cartridge = @import("mbc.zig").MBC1;
 const c = @cImport({
     @cInclude("SDL2/SDL.h");
 });
 
 const print = std.debug.print;
-
-const LOGO = [_]u8{
-    0xCE, 0xED, 0x66, 0x66, 0xCC, 0x0D, 0x00, 0x0B, 0x03, 0x73, 0x00, 0x83, 0x00, 0x0C, 0x00, 0x0D,
-    0x00, 0x08, 0x11, 0x1F, 0x88, 0x89, 0x00, 0x0E, 0xDC, 0xCC, 0x6E, 0xE6, 0xDD, 0xDD, 0xD9, 0x99,
-    0xBB, 0xBB, 0x67, 0x63, 0x6E, 0x0E, 0xEC, 0xCC, 0xDD, 0xDC, 0x99, 0x9F, 0xBB, 0xB9, 0x33, 0x3E,
-};
 
 pub fn main() !u8 {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -27,31 +21,37 @@ pub fn main() !u8 {
     _ = args.skip();
     const rom = args.next().?;
 
-    const boot_rom = try std.fs.cwd().readFileAlloc(alloc, "gb-bootroms/bin/mgb.bin", 256);
+    const boot_rom = try std.fs.cwd().readFileAlloc(alloc, "roms/bootix_dmg.bin", 256);
     defer alloc.free(boot_rom);
 
     const cartridge_data = try std.fs.cwd().readFileAlloc(alloc, rom, 64 * 1024);
     defer alloc.free(cartridge_data);
 
-    var cartridge = Cartridge.new(cartridge_data);
+    var cartridge = try mbc.Cartridge.init(alloc, cartridge_data);
+    defer cartridge.deinit();
 
-    var memory = try Memory.new(alloc, &cartridge);
+    var memory = try Memory.new(alloc, boot_rom, cartridge);
     defer memory.deinit();
 
     const joypad = memory.joypad;
 
     var cp = cpu.new(&memory);
-    cp.pc = 0x100;
 
     var ev: c.SDL_Event = undefined;
     var debug = false;
+    var cycles: usize = 0;
 
     while (true) {
-        var cycles: usize = 0;
-        for (0..100) |_| {
+        const start = try std.time.Instant.now();
+
+        while (true) {
             if (debug) {
                 const opcode: Opcode = @enumFromInt(memory.read(cp.pc));
                 std.debug.print("pc: {x}, op: {any}\n", .{ cp.pc, opcode });
+            }
+
+            if (memory.booting and cp.pc == 0x100) {
+                memory.endBoot();
             }
 
             const duration = try cp.executeOp();
@@ -60,12 +60,11 @@ pub fn main() !u8 {
 
             cycles += duration;
 
-            if (cycles > 1000) {
-                cycles -= 1000;
-                std.time.sleep(600000);
+            if (cycles > 16777) {
+                cycles -= 16777;
+                break;
             }
         }
-
         while (c.SDL_PollEvent(&ev) == 1) {
             switch (ev.type) {
                 c.SDL_QUIT => {
@@ -102,15 +101,14 @@ pub fn main() !u8 {
                 else => {},
             }
         }
+
+        const end = try std.time.Instant.now();
+        const elapsed = end.since(start);
+        const wait_time, const overflow = @subWithOverflow(4 * std.time.ns_per_ms, elapsed);
+        if (overflow == 0) {
+            std.time.sleep(wait_time);
+        }
     }
 
     return 0;
-}
-
-fn test_rom(memory: *Memory) !void {
-    try memory.write(0, @intFromEnum(Opcode.JP_a16));
-    try memory.write(0x9800, 1);
-
-    try memory.write(0x9000, 0b00011011);
-    try memory.write(0x9001, 0b00011011);
 }

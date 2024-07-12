@@ -1,10 +1,7 @@
 const std = @import("std");
 const PPU = @import("ppu.zig").PPU;
-const Cartridge = @import("mbc.zig").MBC1;
-
-const MemoryError = error{
-    WriteNotAllowed,
-};
+const Cartridge = @import("mbc.zig").Cartridge;
+const MemoryError = @import("errors.zig").MemoryError;
 
 pub const Memory = struct {
     work_ram: [8192]u8,
@@ -15,13 +12,16 @@ pub const Memory = struct {
 
     ppu: *PPU,
     joypad: *Joypad,
-    cartridge: *Cartridge,
+    cartridge: Cartridge,
 
     alloc: std.mem.Allocator,
 
+    booting: bool,
+    boot_rom: []u8,
+
     const Self = @This();
 
-    pub fn new(alloc: std.mem.Allocator, cartridge: *Cartridge) !Self {
+    pub fn new(alloc: std.mem.Allocator, boot: []u8, cartridge: Cartridge) !Self {
         const timer: *Timer = try alloc.create(Timer);
         const interrupts: *Interrupts = try alloc.create(Interrupts);
         const io: *IORegisters = try alloc.create(IORegisters);
@@ -40,6 +40,8 @@ pub const Memory = struct {
 
         const mem = Memory{
             .alloc = alloc,
+            .booting = true,
+            .boot_rom = boot,
 
             .work_ram = [_]u8{0} ** 8192,
             ._nu = [_]u8{0} ** 96,
@@ -63,9 +65,13 @@ pub const Memory = struct {
         self.alloc.destroy(self.joypad);
     }
 
+    pub fn endBoot(self: *Self) void {
+        self.booting = false;
+    }
+
     pub fn read(self: *Self, addr: u16) u8 {
         return switch (addr) {
-            0x0000...0x3fff => self.cartridge.read(addr),
+            0x0000...0x3fff => if (self.booting and addr < 0x100) self.boot_rom[addr] else self.cartridge.read(addr),
             0x4000...0x7fff => self.cartridge.read(addr),
             0x8000...0x9fff => self.ppu.read(addr),
             0xa000...0xbfff => self.cartridge.read(addr),

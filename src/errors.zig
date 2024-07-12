@@ -5,3 +5,7 @@ pub const MemoryError = error{
 pub const DisplayError = error{
     InitFailed,
 };
+
+pub const CartridgeError = error{
+    UnknownMBC,
+};
