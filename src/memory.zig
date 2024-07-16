@@ -82,11 +82,11 @@ pub const Memory = struct {
             0xff00 => self.joypad.read(),
             0xff01...0xff03 => 0x0f, // TODO: implement
             0xff04...0xff07 => self.io.timer.read(addr),
-            0xff08...0xff0e => 0, // TODO: implement
+            0xff08...0xff0e => 0,
             0xff0f => self.io.interrupts.read(),
-            0xff10...0xff3f => 0, // TODO: implement
+            0xff10...0xff3f => 0xff, // TODO: implement
             0xff40...0xff4b => self.ppu.read(addr),
-            0xff4c...0xff7f => 0, // TODO: implement
+            0xff4c...0xff7f => 0,
             0xff80...0xfffe => self.high_ram[addr - 0xff80],
             0xffff => self.interrupt_enable,
         };
@@ -103,7 +103,10 @@ pub const Memory = struct {
             0xfe00...0xfe9f => try self.ppu.write(addr, val),
             0xfea0...0xfeff => {},
             0xff00 => self.joypad.write(val),
-            0xff01...0xff03 => {}, // TODO: implement
+            0xff01 => {
+                std.debug.print("{c}", .{val});
+            },
+            0xff02...0xff03 => {},
             0xff04...0xff07 => try self.io.timer.write(addr, val),
             0xff08...0xff0e => {}, // TODO: implement
             0xff0f => self.io.interrupts.write(val),
@@ -228,22 +231,16 @@ pub const Joypad = struct {
     }
 };
 
-const Serial = extern struct {
-    sb: u8,
-    sc: u8,
-};
-
 const Timer = struct {
     // TODO: implement resetting and stoping DIV timer on CPU STOP
     div_counter: usize,
     tima_counter: usize,
 
-    div: u8,
     tima: u8,
     tma: u8,
     tac: u8,
 
-    int: ?*bool,
+    int: *bool,
 
     const Self = @This();
 
@@ -251,7 +248,6 @@ const Timer = struct {
         return .{
             .div_counter = 0,
             .tima_counter = 0,
-            .div = 0,
             .tima = 0,
             .tma = 0,
             .tac = 0,
@@ -260,9 +256,7 @@ const Timer = struct {
     }
 
     pub fn tick(self: *Self, ticks: usize) void {
-        self.div_counter += ticks;
-        self.div +%= @truncate(self.div_counter >> 8);
-        self.div_counter &= 0xff;
+        self.div_counter +%= ticks;
 
         if (self.tac & 0x04 != 0x04) {
             return;
@@ -277,19 +271,19 @@ const Timer = struct {
             else => 0,
         };
 
-        if (self.tima_counter >= tima_div) {
+        while (self.tima_counter >= tima_div) {
             self.tima_counter -= tima_div;
             self.tima, const of = @addWithOverflow(self.tima, 1);
             if (of == 1) {
                 self.tima = self.tma;
-                self.int.?.* = true;
+                self.int.* = true;
             }
         }
     }
 
     fn write(self: *Self, addr: u16, val: u8) !void {
         switch (addr) {
-            0xff04 => self.div = 0,
+            0xff04 => self.div_counter = 0,
             0xff05 => self.tima = val,
             0xff06 => self.tma = val,
             0xff07 => self.tac = val,
@@ -299,7 +293,7 @@ const Timer = struct {
 
     fn read(self: *Self, addr: u16) u8 {
         return switch (addr) {
-            0xff04 => self.div,
+            0xff04 => @truncate(self.div_counter >> 8),
             0xff05 => self.tima,
             0xff06 => self.tma,
             0xff07 => self.tac,

@@ -24,7 +24,7 @@ pub fn main() !u8 {
     const boot_rom = try std.fs.cwd().readFileAlloc(alloc, "roms/bootix_dmg.bin", 256);
     defer alloc.free(boot_rom);
 
-    const cartridge_data = try std.fs.cwd().readFileAlloc(alloc, rom, 64 * 1024);
+    const cartridge_data = try std.fs.cwd().readFileAlloc(alloc, rom, 1024 * 1024);
     defer alloc.free(cartridge_data);
 
     var cartridge = try mbc.Cartridge.init(alloc, cartridge_data);
@@ -36,6 +36,8 @@ pub fn main() !u8 {
     const joypad = memory.joypad;
 
     var cp = cpu.new(&memory);
+
+    memory.ppu.lcd.cpu = &cp;
 
     var ev: c.SDL_Event = undefined;
     var debug = false;
@@ -86,7 +88,6 @@ pub fn main() !u8 {
                 },
                 c.SDL_KEYUP => {
                     switch (ev.key.keysym.scancode) {
-                        c.SDL_SCANCODE_P => debug = !debug,
                         c.SDL_SCANCODE_A => joypad.left = true,
                         c.SDL_SCANCODE_D => joypad.right = true,
                         c.SDL_SCANCODE_W => joypad.up = true,

@@ -58,6 +58,8 @@ pub const CPU = struct {
     ime: bool,
     memory: Memory,
 
+    halted: bool,
+
     const Self = @This();
 
     pub fn getFlags(self: *Self) *FlagsRegister {
@@ -67,6 +69,11 @@ pub const CPU = struct {
     pub fn executeOp(self: *Self) !usize {
         var int_flags = self.readMemory(u8, 0xff0f);
         const int_enabled = self.readMemory(u8, 0xffff);
+
+        if (int_flags & int_enabled > 0) {
+            if (self.halted) self.halted = false;
+        }
+
         if (self.ime and (int_flags & int_enabled) > 0) {
             self.ime = false;
 
@@ -90,6 +97,8 @@ pub const CPU = struct {
             try self.writeMemory(u8, 0xff0f, int_flags);
             return 20;
         }
+
+        if (self.halted) return 4;
 
         const opcode_byte = self.readProgramMemory(u8);
         const opcode: Opcode = @enumFromInt(opcode_byte);
@@ -226,7 +235,7 @@ pub const CPU = struct {
             Opcode.LD_E_HL_addr => self.setE(self.readMemory(u8, self.hl)),
             Opcode.LD_H_HL_addr => self.setH(self.readMemory(u8, self.hl)),
             Opcode.LD_L_HL_addr => self.setL(self.readMemory(u8, self.hl)),
-            Opcode.HALT => {},
+            Opcode.HALT => self.halted = true,
             Opcode.LD_A_HL_addr => self.setA(self.readMemory(u8, self.hl)),
             Opcode.LD_B_A => self.setB(self.a()),
             Opcode.LD_C_A => self.setC(self.a()),
@@ -349,9 +358,9 @@ pub const CPU = struct {
             Opcode.ADD_HL_SP => self.hl = self.add16(self.hl, self.sp),
 
             Opcode.INC_BC => self.bc +%= 1,
-            Opcode.INC_DE => self.de += 1,
-            Opcode.INC_HL => self.hl += 1,
-            Opcode.INC_SP => self.sp += 1,
+            Opcode.INC_DE => self.de +%= 1,
+            Opcode.INC_HL => self.hl +%= 1,
+            Opcode.INC_SP => self.sp +%= 1,
             Opcode.INC_A => self.setA(self.inc8(self.a())),
             Opcode.INC_B => self.setB(self.inc8(self.b())),
             Opcode.INC_C => self.setC(self.inc8(self.c())),
@@ -361,10 +370,10 @@ pub const CPU = struct {
             Opcode.INC_L => self.setL(self.inc8(self.l())),
             Opcode.INC_HL_ADDR => try self.writeMemory(u8, self.hl, self.inc8(self.readMemory(u8, self.hl))),
 
-            Opcode.DEC_BC => self.bc -= 1,
-            Opcode.DEC_DE => self.de -= 1,
-            Opcode.DEC_HL => self.hl -= 1,
-            Opcode.DEC_SP => self.sp -= 1,
+            Opcode.DEC_BC => self.bc -%= 1,
+            Opcode.DEC_DE => self.de -%= 1,
+            Opcode.DEC_HL => self.hl -%= 1,
+            Opcode.DEC_SP => self.sp -%= 1,
             Opcode.DEC_A => self.setA(self.dec8(self.a())),
             Opcode.DEC_B => self.setB(self.dec8(self.b())),
             Opcode.DEC_D => self.setD(self.dec8(self.d())),
@@ -891,43 +900,43 @@ pub const CPU = struct {
         return self.readMemory(T, self.pc);
     }
 
-    fn a(self: *Self) u8 {
+    pub fn a(self: *Self) u8 {
         return @truncate(self.af >> 8);
     }
 
-    fn f(self: *Self) u8 {
+    pub fn f(self: *Self) u8 {
         return @truncate(self.af);
     }
 
-    fn b(self: *Self) u8 {
+    pub fn b(self: *Self) u8 {
         return @truncate(self.bc >> 8);
     }
 
-    fn c(self: *Self) u8 {
+    pub fn c(self: *Self) u8 {
         return @truncate(self.bc);
     }
 
-    fn d(self: *Self) u8 {
+    pub fn d(self: *Self) u8 {
         return @truncate(self.de >> 8);
     }
 
-    fn e(self: *Self) u8 {
+    pub fn e(self: *Self) u8 {
         return @truncate(self.de);
     }
 
-    fn h(self: *Self) u8 {
+    pub fn h(self: *Self) u8 {
         return @truncate(self.hl >> 8);
     }
 
-    fn l(self: *Self) u8 {
+    pub fn l(self: *Self) u8 {
         return @truncate(self.hl);
     }
 
-    fn s(self: *Self) u8 {
+    pub fn s(self: *Self) u8 {
         return @truncate(self.sp >> 8);
     }
 
-    fn p(self: *Self) u8 {
+    pub fn p(self: *Self) u8 {
         return @truncate(self.sp);
     }
 
@@ -1066,6 +1075,7 @@ pub fn new(memory: anytype) CPU {
         .sp = 0,
         .pc = 0,
         .ime = false,
+        .halted = false,
         .memory = Memory.init(memory),
     };
 }
