@@ -67,7 +67,6 @@ pub const PPU = struct {
     vram: [8192]u8,
 
     cycles: usize,
-    scanline_cycles: usize,
     sprite_buffer: std.ArrayList(Sprite),
     window_line_counter: u16,
 
@@ -119,7 +118,6 @@ pub const PPU = struct {
             .obp0 = 0,
             .obp1 = 0,
             .cycles = 0,
-            .scanline_cycles = 0,
             .lx = 0,
             .window_line_counter = 0,
         };
@@ -136,12 +134,17 @@ pub const PPU = struct {
         switch (addr) {
             0x8000...0x9FFF => self.vram[addr - 0x8000] = val,
             0xFE00...0xFE9F => self.oam[addr - 0xFE00] = val,
-            0xFF40 => self.lcdc = @bitCast(val),
-            0xFF41 => self.stat = @bitCast(val & 0x78),
+            0xFF40 => {
+                self.lcdc = @bitCast(val);
+            },
+            0xFF41 => self.stat = @bitCast((val & 0x75) | self.stat.mode),
             0xFF42 => self.scy = val,
             0xFF43 => self.scx = val,
-            0xFF44 => self.ly = val,
-            0xFF45 => self.lyc = val,
+            0xFF44 => {},
+            0xFF45 => {
+                self.lyc = val;
+                self.checkLYCCondition();
+            },
             0xFF47 => self.bgp = val,
             0xFF48 => self.obp0 = val,
             0xFF49 => self.obp1 = val,
@@ -168,6 +171,13 @@ pub const PPU = struct {
             0xFF4B => self.wx,
             else => 0,
         };
+    }
+
+    fn checkLYCCondition(self: *Self) void {
+        self.stat.lyc_eq_ly = self.ly == self.lyc;
+        if (self.stat.lyc_eq_ly and self.stat.lyc_int) {
+            self.stat_interrupt.* = true;
+        }
     }
 
     fn loadSpriteBuffer(self: *Self) !void {
@@ -200,7 +210,7 @@ pub const PPU = struct {
             tile_idx = if (top) sprite.data.tile_idx & 0xfe else sprite.data.tile_idx | 0x01;
         }
 
-        var tile_addr = self.getSpriteTileAddr(tile_idx);
+        var tile_addr = 0x8000 + 16 * @as(u16, tile_idx);
 
         if (sprite.data.y_flip) {
             tile_addr += 14 - offset;
@@ -243,12 +253,21 @@ pub const PPU = struct {
         }
     }
 
+    fn getColor(self: *Self, sprite: *const SpriteData, color_id: u2) u2 {
+        const palette = if (sprite.dmg_palette == 1) self.obp1 else self.obp0;
+        return switch (color_id) {
+            0 => @truncate(palette),
+            1 => @truncate(palette >> 2),
+            2 => @truncate(palette >> 4),
+            3 => @truncate(palette >> 6),
+        };
+    }
+
     pub fn tick(self: *Self, ticks: usize) !void {
-        self.scanline_cycles += ticks;
+        self.cycles += ticks;
 
         switch (self.stat.mode) {
             2 => {
-                self.cycles += ticks;
                 if (self.cycles >= 80) {
                     self.cycles -= 80;
 
@@ -258,10 +277,8 @@ pub const PPU = struct {
                 }
             },
             3 => {
-                self.cycles += ticks;
-                while (self.cycles >= 200) {
-                    self.cycles = 0;
-                    self.stat.mode = 0;
+                if (self.cycles >= 200) {
+                    self.cycles -= 200;
 
                     var line_buffer: [160]u2 = [_]u2{0} ** 160;
 
@@ -397,16 +414,19 @@ pub const PPU = struct {
                         self.lcd.push_pixel(val, x, self.ly);
                     }
 
+                    self.stat.mode = 0;
                     if (self.stat.mode0_int) {
                         self.stat_interrupt.* = true;
                     }
                 }
             },
             0 => {
-                if (self.scanline_cycles >= 456) {
-                    self.scanline_cycles -= 456;
+                if (self.cycles >= 176) {
+                    self.cycles -= 176;
 
-                    self.ly +%= 1;
+                    self.ly += 1;
+                    self.checkLYCCondition();
+
                     if (self.ly < 144) {
                         self.stat.mode = 2;
                         if (self.stat.mode2_int) {
@@ -424,11 +444,12 @@ pub const PPU = struct {
                 }
             },
             1 => {
-                if (self.scanline_cycles >= 456) {
-                    self.scanline_cycles -= 456;
-                    self.ly += 1;
-                    if (self.ly > 153) {
-                        self.ly = 0;
+                if (self.cycles >= 456) {
+                    self.cycles -= 456;
+                    self.ly = (self.ly + 1) % 154;
+                    self.checkLYCCondition();
+
+                    if (self.ly == 0) {
                         self.stat.mode = 2;
                         if (self.stat.mode2_int) {
                             self.stat_interrupt.* = true;
@@ -437,26 +458,6 @@ pub const PPU = struct {
                 }
             },
         }
-
-        const old_lyc_eq_ly = self.stat.lyc_eq_ly;
-        self.stat.lyc_eq_ly = self.ly == self.lyc;
-        if (!old_lyc_eq_ly and self.stat.lyc_eq_ly and self.stat.lyc_int) {
-            self.stat_interrupt.* = true;
-        }
-    }
-
-    fn getSpriteTileAddr(_: *Self, tile_nr: u8) u16 {
-        return 0x8000 + 16 * @as(u16, tile_nr);
-    }
-
-    fn getColor(self: *Self, sprite: *const SpriteData, color_id: u2) u2 {
-        const palette = if (sprite.dmg_palette == 1) self.obp1 else self.obp0;
-        return switch (color_id) {
-            0 => @truncate(palette),
-            1 => @truncate(palette >> 2),
-            2 => @truncate(palette >> 4),
-            3 => @truncate(palette >> 6),
-        };
     }
 };
 

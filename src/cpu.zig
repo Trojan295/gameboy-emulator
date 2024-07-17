@@ -70,26 +70,28 @@ pub const CPU = struct {
         var int_flags = self.readMemory(u8, 0xff0f);
         const int_enabled = self.readMemory(u8, 0xffff);
 
-        if (int_flags & int_enabled > 0) {
+        const masked_ints = int_flags & int_enabled;
+
+        if (masked_ints > 0) {
             if (self.halted) self.halted = false;
         }
 
-        if (self.ime and (int_flags & int_enabled) > 0) {
+        if (self.ime and masked_ints > 0) {
             self.ime = false;
 
-            if (int_flags & 0x01 > 0) {
+            if (masked_ints & 0x01 > 0) {
                 int_flags -= 0x01;
                 try self.callAddr(0x40);
-            } else if (int_flags & 0x02 > 0) {
+            } else if (masked_ints & 0x02 > 0) {
                 int_flags -= 0x02;
                 try self.callAddr(0x48);
-            } else if (int_flags & 0x04 > 0) {
+            } else if (masked_ints & 0x04 > 0) {
                 int_flags -= 0x04;
                 try self.callAddr(0x50);
-            } else if (int_flags & 0x08 > 0) {
+            } else if (masked_ints & 0x08 > 0) {
                 int_flags -= 0x08;
                 try self.callAddr(0x58);
-            } else if (int_flags & 0x10 > 0) {
+            } else if (masked_ints & 0x10 > 0) {
                 int_flags -= 0x10;
                 try self.callAddr(0x60);
             }
