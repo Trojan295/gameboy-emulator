@@ -5,8 +5,6 @@ const c = @cImport({
 });
 const CPU = @import("cpu.zig").CPU;
 
-const assert = std.debug.assert;
-
 const MemoryError = @import("errors.zig").MemoryError;
 const DisplayError = @import("errors.zig").DisplayError;
 
@@ -490,8 +488,6 @@ pub const LCD = struct {
         lcd.alloc = alloc;
         lcd.framebuffer = undefined;
         lcd.cpu = null;
-
-        assert(c.SDL_Init(c.SDL_INIT_VIDEO) == 0);
 
         const window_opt = c.SDL_CreateWindow("GameZigBoy", c.SDL_WINDOWPOS_UNDEFINED, c.SDL_WINDOWPOS_UNDEFINED, width * scale, height * scale, 0);
         if (window_opt == null) {

@@ -21,6 +21,9 @@ pub fn main() !u8 {
     _ = args.skip();
     const rom = args.next().?;
 
+    std.debug.assert(c.SDL_Init(c.SDL_INIT_VIDEO | c.SDL_INIT_AUDIO) == 0);
+    defer c.SDL_Quit();
+
     const boot_rom = try std.fs.cwd().readFileAlloc(alloc, "roms/bootix_dmg.bin", 256);
     defer alloc.free(boot_rom);
 
@@ -59,6 +62,7 @@ pub fn main() !u8 {
             const duration = try cp.executeOp();
             memory.io.timer.tick(duration);
             try memory.ppu.tick(duration);
+            memory.audio.tick(duration);
 
             cycles += duration;
 
@@ -67,6 +71,7 @@ pub fn main() !u8 {
                 break;
             }
         }
+
         while (c.SDL_PollEvent(&ev) == 1) {
             switch (ev.type) {
                 c.SDL_QUIT => {
@@ -107,7 +112,8 @@ pub fn main() !u8 {
         const elapsed = end.since(start);
         const wait_time, const overflow = @subWithOverflow(4 * std.time.ns_per_ms, elapsed);
         if (overflow == 0) {
-            std.time.sleep(wait_time);
+            const wait_ms: u32 = @intCast(wait_time / @as(u64, 1E6));
+            c.SDL_Delay(wait_ms);
         }
     }
 

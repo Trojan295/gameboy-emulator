@@ -1,6 +1,7 @@
 const std = @import("std");
 const PPU = @import("ppu.zig").PPU;
 const Cartridge = @import("mbc.zig").Cartridge;
+const Audio = @import("audio.zig").Audio;
 const MemoryError = @import("errors.zig").MemoryError;
 
 pub const Memory = struct {
@@ -13,6 +14,7 @@ pub const Memory = struct {
     ppu: *PPU,
     joypad: *Joypad,
     cartridge: Cartridge,
+    audio: *Audio,
 
     alloc: std.mem.Allocator,
 
@@ -22,17 +24,19 @@ pub const Memory = struct {
     const Self = @This();
 
     pub fn new(alloc: std.mem.Allocator, boot: []u8, cartridge: Cartridge) !Self {
-        const timer: *Timer = try alloc.create(Timer);
         const interrupts: *Interrupts = try alloc.create(Interrupts);
-        const io: *IORegisters = try alloc.create(IORegisters);
         interrupts.* = Interrupts.new();
 
+        const timer: *Timer = try alloc.create(Timer);
         timer.* = Timer.new(&interrupts.timer);
 
+        const io: *IORegisters = try alloc.create(IORegisters);
         io.* = IORegisters{
             .timer = timer,
             .interrupts = interrupts,
         };
+
+        const audio = try Audio.new(alloc);
 
         const ppu: *PPU = try PPU.new(alloc, &interrupts.vblank, &interrupts.lcd);
         const joypad: *Joypad = try alloc.create(Joypad);
@@ -52,6 +56,7 @@ pub const Memory = struct {
             .ppu = ppu,
             .joypad = joypad,
             .cartridge = cartridge,
+            .audio = audio,
         };
 
         return mem;
@@ -63,6 +68,7 @@ pub const Memory = struct {
         self.alloc.destroy(self.io.interrupts);
         self.alloc.destroy(self.io);
         self.alloc.destroy(self.joypad);
+        self.alloc.destroy(self.audio);
     }
 
     pub fn endBoot(self: *Self) void {
@@ -84,7 +90,7 @@ pub const Memory = struct {
             0xff04...0xff07 => self.io.timer.read(addr),
             0xff08...0xff0e => 0,
             0xff0f => self.io.interrupts.read(),
-            0xff10...0xff3f => 0xff, // TODO: implement
+            0xff10...0xff3f => self.audio.read(addr),
             0xff40...0xff4b => self.ppu.read(addr),
             0xff4c...0xff7f => 0,
             0xff80...0xfffe => self.high_ram[addr - 0xff80],
@@ -110,7 +116,7 @@ pub const Memory = struct {
             0xff04...0xff07 => try self.io.timer.write(addr, val),
             0xff08...0xff0e => {}, // TODO: implement
             0xff0f => self.io.interrupts.write(val),
-            0xff10...0xff3f => {}, // TODO: implement
+            0xff10...0xff3f => self.audio.write(addr, val),
             0xff40...0xff45 => try self.ppu.write(addr, val),
             0xff46 => try self.dma_oam_transfer(val),
             0xff47...0xff4b => try self.ppu.write(addr, val),
@@ -300,18 +306,6 @@ const Timer = struct {
             else => 255,
         };
     }
-};
-
-const Audio = extern struct {
-    _todo: [22]u8,
-};
-
-const WavePattern = extern struct {
-    _todo: [16]u8,
-};
-
-const LCD = extern struct {
-    _todo: [12]u8,
 };
 
 test "timers_div" {

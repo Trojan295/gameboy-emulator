@@ -9,3 +9,7 @@ pub const DisplayError = error{
 pub const CartridgeError = error{
     UnknownMBC,
 };
+
+pub const AudioError = error{
+    CannotPlay,
+};
