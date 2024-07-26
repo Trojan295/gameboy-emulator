@@ -155,13 +155,11 @@ pub const Audio = struct {
 
             0xff24 => @bitCast(self.nr50),
             0xff25 => @bitCast(self.nr51),
-            0xff26 => @as(u8, @bitCast(self.nr52)) + 0x70 + boolToInt(self.ch1.running, 0) + boolToInt(self.ch2.running, 1) + boolToInt(self.ch3.running, 2) + boolToInt(self.ch4.running, 3),
+            0xff26 => @as(u8, @bitCast(self.nr52)) + 0x70 + boolToInt(self.ch1.isRunning(), 0) + boolToInt(self.ch2.isRunning(), 1) + boolToInt(self.ch3.isRunning(), 2) + boolToInt(self.ch4.running, 3),
 
             0xff30...0xff3f => self.ch3.wave[addr - 0xff30],
             else => 0xff,
         };
-
-        //std.debug.print("audio read {x}: {x}\n", .{ addr, val });
 
         return val;
     }
@@ -175,8 +173,6 @@ pub const Audio = struct {
             return;
         }
 
-        //std.debug.print("audio write {x}: {x}\n", .{ addr, val });
-
         switch (addr) {
             0xff10 => {
                 self.ch1.period_step = @truncate(val);
@@ -184,16 +180,16 @@ pub const Audio = struct {
                 self.ch1.period_pace = @truncate(val >> 4);
             },
             0xff11 => {
-                const time: u6 = @truncate(val);
-
-                self.ch1.initial_timer_length = time;
-                if (self.ch1.running) self.ch1.length = time;
+                self.ch1.length = @truncate(val);
                 self.ch1.duty = @truncate(val >> 6);
             },
             0xff12 => {
                 self.ch1.env_sweep_pace = @truncate(val);
                 self.ch1.env_dir = val & 0x8 == 0x8;
                 self.ch1.initial_volume = @truncate(val >> 4);
+                if (!self.ch1.dacEnabled()) {
+                    self.ch1.running = false;
+                }
             },
             0xff13 => {
                 self.ch1.period = (self.ch1.period & 0x700) + val;
@@ -206,13 +202,16 @@ pub const Audio = struct {
                 }
             },
             0xff16 => {
-                self.ch2.initial_timer_length = @truncate(val);
+                self.ch2.length = @truncate(val);
                 self.ch2.duty = @truncate(val >> 6);
             },
             0xff17 => {
                 self.ch2.env_sweep_pace = @truncate(val);
                 self.ch2.env_dir = val & 0x8 == 0x8;
                 self.ch2.initial_volume = @truncate(val >> 4);
+                if (!self.ch2.dacEnabled()) {
+                    self.ch2.running = false;
+                }
             },
             0xff18 => {
                 self.ch2.period = (self.ch2.period & 0x700) + val;
@@ -226,9 +225,12 @@ pub const Audio = struct {
             },
             0xff1a => {
                 self.ch3.dac_on = val & 0x80 == 0x80;
+                if (!self.ch3.dac_on) {
+                    self.ch3.running = false;
+                }
             },
             0xff1b => {
-                self.ch3.initial_timer_length = val;
+                self.ch3.length = val;
             },
             0xff1c => {
                 self.ch3.output_level = @truncate(val >> 5);
@@ -239,17 +241,20 @@ pub const Audio = struct {
             0xff1e => {
                 self.ch3.period = (@as(u11, val & 0x7) << 8) + (self.ch3.period & 0xff);
                 self.ch3.length_enable = val & 0x40 == 0x40;
-                if (val & 0x80 == 0x80) {
+                if (val & 0x80 == 0x80 and self.ch3.dac_on) {
                     self.ch3.trigger();
                 }
             },
             0xff20 => {
-                self.ch4.initial_timer_length = @truncate(val);
+                self.ch4.length = @truncate(val);
             },
             0xff21 => {
                 self.ch4.env_sweep_pace = @truncate(val);
                 self.ch4.env_dir = val & 0x8 == 0x8;
                 self.ch4.initial_volume = @truncate(val >> 4);
+                if (!self.ch4.dacEnabled()) {
+                    self.ch4.running = false;
+                }
             },
             0xff22 => {
                 self.ch4.clock_divider = @truncate(val);
@@ -258,7 +263,7 @@ pub const Audio = struct {
             },
             0xff23 => {
                 self.ch4.length_enable = val & 0x40 == 0x40;
-                if (val & 0x80 == 0x80) self.ch4.trigger();
+                if (val & 0x80 == 0x80 and self.ch4.dacEnabled()) self.ch4.trigger();
             },
             0xff24 => self.nr50 = @bitCast(val),
             0xff25 => self.nr51 = @bitCast(val),
@@ -289,7 +294,6 @@ const Channel1 = struct {
     period_direction: bool,
     period_step: u3,
     duty: u2,
-    initial_timer_length: u6,
     initial_volume: u4,
     env_dir: bool,
     env_sweep_pace: u3,
@@ -319,7 +323,6 @@ const Channel1 = struct {
             .period_direction = false,
             .period_step = 0,
             .duty = 0,
-            .initial_timer_length = 0,
             .initial_volume = 0,
             .env_dir = false,
             .env_sweep_pace = 0,
@@ -365,6 +368,7 @@ const Channel1 = struct {
                         self.period, const dof = @addWithOverflow(self.period, delta);
                         if (dof > 0) {
                             self.period_pace = 0;
+                            self.running = false;
                         }
                     }
                 }
@@ -383,21 +387,28 @@ const Channel1 = struct {
         }
 
         self.length_divider, const of = @addWithOverflow(self.length_divider, @as(u14, @intCast(ticks)));
-        if (of > 0 and self.length_enable and self.running) {
+        if (of > 0 and self.length_enable) {
             self.length, const lof = @addWithOverflow(self.length, 1);
-            std.debug.print("length: {}\n", .{self.length});
-            if (lof > 0) {
-                std.debug.print("overflow\n", .{});
+            if (lof > 0 and self.isRunning()) {
                 self.running = false;
             }
         }
     }
 
     fn trigger(self: *Self) void {
+        if (!self.dacEnabled()) return;
+
         self.period_divider = self.period;
         self.volume = self.initial_volume;
-        self.length = self.initial_timer_length;
         self.running = true;
+    }
+
+    fn dacEnabled(self: *Self) bool {
+        return !(self.initial_volume == 0 and !self.env_dir);
+    }
+
+    fn isRunning(self: *Self) bool {
+        return self.dacEnabled() and self.running;
     }
 
     fn getSample(self: *Self) f32 {
@@ -422,7 +433,6 @@ const Channel2 = struct {
     running: bool,
 
     duty: u2,
-    initial_timer_length: u6,
     initial_volume: u4,
     env_dir: bool,
     env_sweep_pace: u3,
@@ -445,7 +455,6 @@ const Channel2 = struct {
             .running = false,
 
             .duty = 0,
-            .initial_timer_length = 0,
             .initial_volume = 0,
             .env_dir = false,
             .env_sweep_pace = 0,
@@ -485,21 +494,29 @@ const Channel2 = struct {
             }
         }
 
-        if (self.length_enable) {
-            self.length_divider, const of = @addWithOverflow(self.length_divider, @as(u14, @intCast(ticks)));
-            if (of > 0) {
-                self.length, const lof = @addWithOverflow(self.length, 1);
-                if (lof > 0) {
-                    self.running = false;
-                }
+        self.length_divider, const of = @addWithOverflow(self.length_divider, @as(u14, @intCast(ticks)));
+        if (of > 0 and self.length_enable) {
+            self.length, const lof = @addWithOverflow(self.length, 1);
+            if (lof > 0) {
+                self.running = false;
             }
         }
     }
 
     fn trigger(self: *Self) void {
+        if (!self.dacEnabled()) return;
+
         self.period_divider = self.period;
-        self.length = self.initial_timer_length;
+        self.volume = self.initial_volume;
         self.running = true;
+    }
+
+    fn dacEnabled(self: *Self) bool {
+        return !(self.initial_volume == 0 and !self.env_dir);
+    }
+
+    fn isRunning(self: *Self) bool {
+        return self.dacEnabled() and self.running;
     }
 
     fn getSample(self: *Self) f32 {
@@ -524,7 +541,6 @@ const Channel3 = struct {
     running: bool,
 
     dac_on: bool,
-    initial_timer_length: u8,
     output_level: u2,
     period: u11,
     length_enable: bool,
@@ -544,7 +560,6 @@ const Channel3 = struct {
             .running = false,
 
             .dac_on = false,
-            .initial_timer_length = 0,
             .output_level = 0,
             .period = 0,
             .length_enable = false,
@@ -583,8 +598,11 @@ const Channel3 = struct {
 
     fn trigger(self: *Self) void {
         self.period_divider = self.period;
-        self.length = self.initial_timer_length;
         self.running = true;
+    }
+
+    fn isRunning(self: *Self) bool {
+        return self.dac_on and self.running;
     }
 
     fn getSample(self: *Self) f32 {
@@ -603,7 +621,6 @@ const Channel4 = struct {
     ticks: usize,
     running: bool,
 
-    initial_timer_length: u6,
     clock_shift: u4,
     lfsr_width: bool,
     clock_divider: u3,
@@ -627,7 +644,6 @@ const Channel4 = struct {
             .ticks = 0,
             .running = false,
 
-            .initial_timer_length = 0,
             .clock_shift = 0,
             .lfsr_width = false,
             .clock_divider = 0,
@@ -670,9 +686,16 @@ const Channel4 = struct {
     }
 
     fn trigger(self: *Self) void {
-        self.length = self.initial_timer_length;
         self.lfsr = 1;
         self.running = true;
+    }
+
+    fn dacEnabled(self: *Self) bool {
+        return !(self.initial_volume == 0 and !self.env_dir);
+    }
+
+    fn isRunning(self: *Self) bool {
+        return self.dacEnabled() and self.running;
     }
 
     fn getSample(self: *Self) f32 {
