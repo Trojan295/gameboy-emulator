@@ -17,16 +17,19 @@ pub const Cartridge = struct {
     pub fn init(alloc: std.mem.Allocator, data: []u8) !Cartridge {
         switch (data[0x147]) {
             0x0 => {
+                std.debug.print("Selected MBC: ROMOnly\n", .{});
                 const rom = try alloc.create(ROMOnly);
                 rom.* = ROMOnly.new(data);
                 return Cartridge.new(alloc, rom);
             },
             0x1, 0x2, 0x3 => {
+                std.debug.print("Selected MBC: MBC1\n", .{});
                 const rom = try alloc.create(MBC1);
                 rom.* = try MBC1.new(alloc, data);
                 return Cartridge.new(alloc, rom);
             },
             0x13 => {
+                std.debug.print("Selected MBC: MBC3\n", .{});
                 const rom = try alloc.create(MBC3);
                 rom.* = try MBC3.new(alloc, data);
                 return Cartridge.new(alloc, rom);
@@ -140,7 +143,7 @@ pub const MBC1 = struct {
     pub fn read(self: *Self, addr: u16) u8 {
         return switch (addr) {
             0x0000...0x3FFF => self.data[addr],
-            0x4000...0x7FFF => self.data[0x4000 * (@as(usize, self.rom_bank) - 1) + addr],
+            0x4000...0x7FFF => self.data[0x4000 * (@as(usize, if (self.rom_bank == 0) 1 else self.rom_bank) - 1) + addr],
             0xA000...0xBFFF => if (self.ram_enabled) self.ram[self.getRAMAddr(addr)] else 0xff,
             else => 0xFF,
         };
@@ -152,7 +155,7 @@ pub const MBC1 = struct {
                 self.ram_enabled = (val & 0xF) == 0xA;
             },
             0x2000...0x3FFF => {
-                self.rom_bank = if (val == 0) 1 else val & 0x1F;
+                self.rom_bank = val & 0x03; //& 0x1F;
             },
             0x4000...0x5FFF => {
                 self.ram_bank = val & 0x03;

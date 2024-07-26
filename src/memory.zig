@@ -19,11 +19,11 @@ pub const Memory = struct {
     alloc: std.mem.Allocator,
 
     booting: bool,
-    boot_rom: []u8,
+    boot_rom: []const u8,
 
     const Self = @This();
 
-    pub fn new(alloc: std.mem.Allocator, boot: []u8, cartridge: Cartridge) !Self {
+    pub fn new(alloc: std.mem.Allocator, boot: []const u8, cartridge: Cartridge) !Self {
         const interrupts: *Interrupts = try alloc.create(Interrupts);
         interrupts.* = Interrupts.new();
 
@@ -72,6 +72,7 @@ pub const Memory = struct {
     }
 
     pub fn endBoot(self: *Self) void {
+        std.debug.print("finished boot\n", .{});
         self.booting = false;
     }
 
@@ -239,7 +240,7 @@ pub const Joypad = struct {
 
 const Timer = struct {
     // TODO: implement resetting and stoping DIV timer on CPU STOP
-    div_counter: usize,
+    div_counter: u16,
     tima_counter: usize,
 
     tima: u8,
@@ -262,7 +263,7 @@ const Timer = struct {
     }
 
     pub fn tick(self: *Self, ticks: usize) void {
-        self.div_counter +%= ticks;
+        self.div_counter +%= @truncate(ticks);
 
         if (self.tac & 0x04 != 0x04) {
             return;
@@ -288,6 +289,7 @@ const Timer = struct {
     }
 
     fn write(self: *Self, addr: u16, val: u8) !void {
+        std.debug.print("timer write {x}: {x}\n", .{ addr, val });
         switch (addr) {
             0xff04 => self.div_counter = 0,
             0xff05 => self.tima = val,
@@ -298,13 +300,16 @@ const Timer = struct {
     }
 
     fn read(self: *Self, addr: u16) u8 {
-        return switch (addr) {
+        const val: u8 = switch (addr) {
             0xff04 => @truncate(self.div_counter >> 8),
             0xff05 => self.tima,
             0xff06 => self.tma,
             0xff07 => self.tac,
             else => 255,
         };
+
+        std.debug.print("timer read {x}: {x}\n", .{ addr, val });
+        return val;
     }
 };
 

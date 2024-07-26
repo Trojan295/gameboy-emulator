@@ -72,8 +72,8 @@ pub const CPU = struct {
 
         const masked_ints = int_flags & int_enabled;
 
-        if (masked_ints > 0) {
-            if (self.halted) self.halted = false;
+        if (masked_ints > 0 and self.halted) {
+            self.halted = false;
         }
 
         if (self.ime and masked_ints > 0) {
@@ -758,19 +758,19 @@ pub const CPU = struct {
                     Opcode.JR_Z_e8 => if (self.getFlags().zero) 12 else 8,
                     Opcode.JR_NC_e8 => if (!self.getFlags().carry) 12 else 8,
                     Opcode.JR_C_e8 => if (self.getFlags().carry) 12 else 8,
-                    else => 12,
+                    else => return CPUError.UnknownOpcode,
                 },
                 1 => if (((opcode_byte & 0o70) % 16) == 0) 12 else 8,
                 2 => 8,
                 3 => 8,
                 4 => if (opcode == Opcode.INC_HL_ADDR) 12 else 4,
                 5 => if (opcode == Opcode.DEC_HL_ADDR) 12 else 4,
-                6 => if (opcode == Opcode.LD_HL_ADDR_n8) 12 else 4,
+                6 => if (opcode == Opcode.LD_HL_ADDR_n8) 12 else 8,
                 7 => 4,
                 else => return CPUError.UnknownOpcode,
             },
-            0o100 => if (opcode_byte & 6 == 6) 8 else 4,
-            0o200 => if (opcode_byte & 6 == 6) 8 else 4,
+            0o100 => if ((opcode_byte & 0o7 == 0o6) or (opcode_byte & 0o370 == 0o160)) 8 else 4,
+            0o200 => if (opcode_byte & 0o7 == 0o6) 8 else 4,
             0o300 => switch (opcode_byte & 0o007) {
                 0 => switch (opcode) {
                     Opcode.RET_NZ => if (!self.getFlags().zero) 20 else 8,
@@ -1066,21 +1066,21 @@ pub const CPU = struct {
         self.getFlags().carry = false;
         return result;
     }
-};
 
-pub fn new(memory: anytype) CPU {
-    return CPU{
-        .af = 0,
-        .bc = 0,
-        .de = 0,
-        .hl = 0,
-        .sp = 0,
-        .pc = 0,
-        .ime = false,
-        .halted = false,
-        .memory = Memory.init(memory),
-    };
-}
+    pub fn new(memory: anytype) Self {
+        return Self{
+            .af = 0,
+            .bc = 0,
+            .de = 0,
+            .hl = 0,
+            .sp = 0,
+            .pc = 0,
+            .ime = false,
+            .halted = false,
+            .memory = Memory.init(memory),
+        };
+    }
+};
 
 pub const FlagsRegister = packed struct {
     _padding: u4 = 0,
@@ -1128,7 +1128,7 @@ const CPUTestState = struct {
     const Self = @This();
 
     fn createCPU(self: *const Self, memory: *ArrayMemory) !CPU {
-        var cpu = new(memory);
+        var cpu = CPU.new(memory);
         cpu.af = (@as(u16, self.a) << 8) + self.f;
         cpu.bc = (@as(u16, self.b) << 8) + self.c;
         cpu.de = (@as(u16, self.d) << 8) + self.e;

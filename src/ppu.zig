@@ -18,6 +18,28 @@ const STATRegister = packed struct {
     _n: u1,
 };
 
+const STATInts = struct {
+    mode0: bool,
+    mode1: bool,
+    mode2: bool,
+    lyc: bool,
+
+    const Self = @This();
+
+    fn new() STATInts {
+        return STATInts{
+            .mode0 = false,
+            .mode1 = false,
+            .mode2 = false,
+            .lyc = false,
+        };
+    }
+
+    fn any(self: *const Self) bool {
+        return self.mode0 or self.mode1 or self.mode2 or self.lyc;
+    }
+};
+
 const LCDCRegister = packed struct {
     bg_enable: bool,
     obj_enable: bool,
@@ -72,23 +94,27 @@ pub const PPU = struct {
 
     lcd: *LCD,
 
+    stat_int_line: bool,
     vblank_interrupt: *bool,
     stat_interrupt: *bool,
 
     const Self = @This();
 
     pub fn new(alloc: std.mem.Allocator, vblank_interrupt: *bool, stat_interrupt: *bool) !*PPU {
+        _ = c.TTF_Init();
+
         const ptr = try alloc.create(PPU);
         ptr.* = PPU{
             .alloc = alloc,
             .vblank_interrupt = vblank_interrupt,
             .stat_interrupt = stat_interrupt,
+            .stat_int_line = false,
             .lcd = try LCD.new(alloc),
             .oam = undefined,
             .vram = undefined,
             .sprite_buffer = std.ArrayList(Sprite).init(alloc),
             .stat = STATRegister{
-                .mode = 3,
+                .mode = 0,
                 ._n = 0,
                 .lyc_int = false,
                 .lyc_eq_ly = false,
@@ -130,18 +156,25 @@ pub const PPU = struct {
 
     pub fn write(self: *Self, addr: u16, val: u8) !void {
         switch (addr) {
-            0x8000...0x9FFF => self.vram[addr - 0x8000] = val,
-            0xFE00...0xFE9F => self.oam[addr - 0xFE00] = val,
-            0xFF40 => {
-                self.lcdc = @bitCast(val);
+            0x8000...0x9FFF => {
+                if (self.stat.mode != 3 or !self.lcdc.lcd_enable) self.vram[addr - 0x8000] = val;
             },
-            0xFF41 => self.stat = @bitCast((val & 0x75) | self.stat.mode),
+            0xFE00...0xFE9F => self.oam[addr - 0xFE00] = val,
+            0xFF40 => self.lcdc = @bitCast(val),
+            0xFF41 => self.stat = @bitCast((val & 0x78) + self.stat.mode + (@as(u8, if (self.stat.lyc_eq_ly) 1 else 0) << 2)),
             0xFF42 => self.scy = val,
             0xFF43 => self.scx = val,
             0xFF44 => {},
             0xFF45 => {
                 self.lyc = val;
-                self.checkLYCCondition();
+
+                if (self.lyc == self.ly) {
+                    self.stat.lyc_eq_ly = true;
+                }
+                if (self.stat_int_line == false and self.stat.lyc_int and self.stat.lyc_eq_ly) {
+                    self.stat_interrupt.* = true;
+                    self.stat_int_line = true;
+                }
             },
             0xFF47 => self.bgp = val,
             0xFF48 => self.obp0 = val,
@@ -149,7 +182,6 @@ pub const PPU = struct {
             0xFF4A => self.wy = val,
             0xFF4B => self.wx = val,
             else => {
-                std.log.debug("ppu write: {x}\n", .{addr});
                 return MemoryError.WriteNotAllowed;
             },
         }
@@ -169,13 +201,6 @@ pub const PPU = struct {
             0xFF4B => self.wx,
             else => 0,
         };
-    }
-
-    fn checkLYCCondition(self: *Self) void {
-        self.stat.lyc_eq_ly = self.ly == self.lyc;
-        if (self.stat.lyc_eq_ly and self.stat.lyc_int) {
-            self.stat_interrupt.* = true;
-        }
     }
 
     fn loadSpriteBuffer(self: *Self) !void {
@@ -262,10 +287,16 @@ pub const PPU = struct {
     }
 
     pub fn tick(self: *Self, ticks: usize) !void {
+        if (!self.lcdc.lcd_enable) {
+            return;
+        }
+
+        var stat_ints = STATInts.new();
         self.cycles += ticks;
 
         switch (self.stat.mode) {
             2 => {
+                stat_ints.mode2 = self.stat.mode2_int;
                 if (self.cycles >= 80) {
                     self.cycles -= 80;
 
@@ -275,8 +306,8 @@ pub const PPU = struct {
                 }
             },
             3 => {
-                if (self.cycles >= 200) {
-                    self.cycles -= 200;
+                if (self.cycles >= 172) {
+                    self.cycles -= 172;
 
                     var line_buffer: [160]u2 = [_]u2{0} ** 160;
 
@@ -287,7 +318,7 @@ pub const PPU = struct {
                         bg: for (0..21) |i| {
                             const lx: u16 = @truncate(i);
                             const x: u16 = ((self.scx / 8) + lx) & 0x1F;
-                            const y: u16 = ((@as(u16, self.scy) + @as(u16, self.ly)) / 8) & 0xFF;
+                            const y: u16 = ((@as(u16, self.scy) + @as(u16, self.ly)) & 0xFF) / 8;
 
                             const tile_map_bank: u16 = if (self.lcdc.bg_tile_map_select) 0x9c00 else 0x9800;
                             const tile_map_addr: u16 = tile_map_bank + y * 32 + x;
@@ -332,7 +363,6 @@ pub const PPU = struct {
                         }
 
                         var had_window = false;
-
                         for (0..20) |i| {
                             if (!self.lcdc.window_enable) break;
 
@@ -413,49 +443,45 @@ pub const PPU = struct {
                     }
 
                     self.stat.mode = 0;
-                    if (self.stat.mode0_int) {
-                        self.stat_interrupt.* = true;
-                    }
                 }
             },
             0 => {
-                if (self.cycles >= 176) {
-                    self.cycles -= 176;
+                stat_ints.mode0 = self.stat.mode0_int;
+                if (self.cycles >= 204) {
+                    self.cycles -= 204;
 
                     self.ly += 1;
-                    self.checkLYCCondition();
-
                     if (self.ly < 144) {
                         self.stat.mode = 2;
-                        if (self.stat.mode2_int) {
-                            self.stat_interrupt.* = true;
-                        }
                     } else {
                         try self.lcd.render();
                         self.window_line_counter = 0;
                         self.stat.mode = 1;
                         self.vblank_interrupt.* = true;
-                        if (self.stat.mode1_int) {
-                            self.stat_interrupt.* = true;
-                        }
                     }
                 }
             },
             1 => {
+                stat_ints.mode1 = self.stat.mode1_int;
                 if (self.cycles >= 456) {
                     self.cycles -= 456;
                     self.ly = (self.ly + 1) % 154;
-                    self.checkLYCCondition();
 
                     if (self.ly == 0) {
                         self.stat.mode = 2;
-                        if (self.stat.mode2_int) {
-                            self.stat_interrupt.* = true;
-                        }
                     }
                 }
             },
         }
+
+        self.stat.lyc_eq_ly = self.ly == self.lyc;
+        if (self.stat.lyc_int and self.stat.lyc_eq_ly) stat_ints.lyc = true;
+
+        const any_stat_int = stat_ints.any();
+        if (self.stat_int_line == false and any_stat_int) {
+            self.stat_interrupt.* = true;
+        }
+        self.stat_int_line = any_stat_int;
     }
 };
 
@@ -533,7 +559,6 @@ pub const LCD = struct {
         _ = c.SDL_UpdateTexture(self.texture, &rect, ptr, 800);
         _ = c.SDL_RenderCopy(self.renderer, self.texture, null, &rect);
 
-        _ = c.TTF_Init();
         const font = c.TTF_OpenFont("/usr/share/fonts/truetype/ubuntu/UbuntuMono-R.ttf", 24).?;
 
         if (self.cpu != null) {

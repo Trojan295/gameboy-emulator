@@ -46,11 +46,7 @@ pub const Audio = struct {
         ch4_left: bool,
     };
     const NR52 = packed struct {
-        ch1_on: bool,
-        ch2_on: bool,
-        ch3_on: bool,
-        ch4_on: bool,
-        _n: u3,
+        _n: u7,
         audio_on: bool,
     };
     pub fn new(alloc: std.mem.Allocator) !*Self {
@@ -133,21 +129,65 @@ pub const Audio = struct {
         self.nr14.period = @truncate(period >> 8);
     }
 
-    pub fn read(_: *Self, addr: u16) u8 {
-        std.debug.print("audio read: {x}\n", .{addr});
-        return 0;
+    pub fn read(self: *Self, addr: u16) u8 {
+        const val: u8 = switch (addr) {
+            0xff10 => @as(u8, self.ch1.period_step) + (@as(u8, self.ch1.period_pace) << 4) + boolToInt(self.ch1.period_direction, 3) + 0x80,
+            0xff11 => 0x3f + (@as(u8, self.ch1.duty) << 6),
+            0xff12 => @as(u8, self.ch1.env_sweep_pace) + boolToInt(self.ch1.env_dir, 3) + (@as(u8, self.ch1.initial_volume) << 4),
+            0xff13 => 0xff,
+            0xff14 => 0xbf + boolToInt(self.ch1.length_enable, 6),
+
+            0xff16 => 0x3f + (@as(u8, self.ch2.duty) << 6),
+            0xff17 => @as(u8, self.ch2.env_sweep_pace) + boolToInt(self.ch2.env_dir, 3) + (@as(u8, self.ch2.initial_volume) << 4),
+            0xff18 => 0xff,
+            0xff19 => 0xbf + boolToInt(self.ch2.length_enable, 6),
+
+            0xff1a => 0x7f + boolToInt(self.ch3.dac_on, 7),
+            0xff1b => 0xff,
+            0xff1c => 0x9f + (@as(u8, self.ch3.output_level) << 5),
+            0xff1d => 0xff,
+            0xff1e => 0xbf + boolToInt(self.ch3.length_enable, 6),
+
+            0xff20 => 0xff,
+            0xff21 => @as(u8, self.ch4.env_sweep_pace) + boolToInt(self.ch4.env_dir, 3) + (@as(u8, self.ch4.initial_volume) << 4),
+            0xff22 => @as(u8, self.ch4.clock_divider) + boolToInt(self.ch4.lfsr_width, 3) + (@as(u8, self.ch4.clock_shift) << 4),
+            0xff23 => 0xbf + boolToInt(self.ch4.length_enable, 6),
+
+            0xff24 => @bitCast(self.nr50),
+            0xff25 => @bitCast(self.nr51),
+            0xff26 => @as(u8, @bitCast(self.nr52)) + 0x70 + boolToInt(self.ch1.running, 0) + boolToInt(self.ch2.running, 1) + boolToInt(self.ch3.running, 2) + boolToInt(self.ch4.running, 3),
+
+            0xff30...0xff3f => self.ch3.wave[addr - 0xff30],
+            else => 0xff,
+        };
+
+        //std.debug.print("audio read {x}: {x}\n", .{ addr, val });
+
+        return val;
+    }
+
+    fn boolToInt(b: bool, comptime pow: u3) u8 {
+        return if (b) (1 << pow) else 0;
     }
 
     pub fn write(self: *Self, addr: u16, val: u8) void {
-        //std.debug.print("audio write: {x}: {x}\n", .{ addr, val });
+        if (!self.nr52.audio_on and addr != 0xff26) {
+            return;
+        }
+
+        //std.debug.print("audio write {x}: {x}\n", .{ addr, val });
+
         switch (addr) {
             0xff10 => {
                 self.ch1.period_step = @truncate(val);
-                self.ch1.period_direction = val & 0x80 == 0x80;
+                self.ch1.period_direction = val & 0x8 == 0x8;
                 self.ch1.period_pace = @truncate(val >> 4);
             },
             0xff11 => {
-                self.ch1.initial_timer_length = @truncate(val);
+                const time: u6 = @truncate(val);
+
+                self.ch1.initial_timer_length = time;
+                if (self.ch1.running) self.ch1.length = time;
                 self.ch1.duty = @truncate(val >> 6);
             },
             0xff12 => {
@@ -187,6 +227,22 @@ pub const Audio = struct {
             0xff1a => {
                 self.ch3.dac_on = val & 0x80 == 0x80;
             },
+            0xff1b => {
+                self.ch3.initial_timer_length = val;
+            },
+            0xff1c => {
+                self.ch3.output_level = @truncate(val >> 5);
+            },
+            0xff1d => {
+                self.ch3.period = (self.ch3.period & 0x700) + val;
+            },
+            0xff1e => {
+                self.ch3.period = (@as(u11, val & 0x7) << 8) + (self.ch3.period & 0xff);
+                self.ch3.length_enable = val & 0x40 == 0x40;
+                if (val & 0x80 == 0x80) {
+                    self.ch3.trigger();
+                }
+            },
             0xff20 => {
                 self.ch4.initial_timer_length = @truncate(val);
             },
@@ -206,7 +262,20 @@ pub const Audio = struct {
             },
             0xff24 => self.nr50 = @bitCast(val),
             0xff25 => self.nr51 = @bitCast(val),
-            0xff26 => self.nr52 = @bitCast(val),
+            0xff26 => {
+                if (val & 0x80 == 0x80) {
+                    self.nr52.audio_on = true;
+                } else {
+                    for (0xff10..0xff26) |a| {
+                        self.write(@truncate(a), 0);
+                    }
+
+                    self.nr52.audio_on = false;
+                }
+            },
+
+            0xff30...0xff3f => self.ch3.wave[addr - 0xff30] = val,
+
             else => {},
         }
     }
@@ -313,13 +382,13 @@ const Channel1 = struct {
             }
         }
 
-        if (self.length_enable) {
-            self.length_divider, const of = @addWithOverflow(self.length_divider, @as(u14, @intCast(ticks)));
-            if (of > 0) {
-                self.length, const lof = @addWithOverflow(self.length, 1);
-                if (lof > 0) {
-                    self.running = false;
-                }
+        self.length_divider, const of = @addWithOverflow(self.length_divider, @as(u14, @intCast(ticks)));
+        if (of > 0 and self.length_enable and self.running) {
+            self.length, const lof = @addWithOverflow(self.length, 1);
+            std.debug.print("length: {}\n", .{self.length});
+            if (lof > 0) {
+                std.debug.print("overflow\n", .{});
+                self.running = false;
             }
         }
     }
@@ -327,6 +396,7 @@ const Channel1 = struct {
     fn trigger(self: *Self) void {
         self.period_divider = self.period;
         self.volume = self.initial_volume;
+        self.length = self.initial_timer_length;
         self.running = true;
     }
 
@@ -428,7 +498,6 @@ const Channel2 = struct {
 
     fn trigger(self: *Self) void {
         self.period_divider = self.period;
-        self.volume = self.initial_volume;
         self.length = self.initial_timer_length;
         self.running = true;
     }
@@ -438,7 +507,7 @@ const Channel2 = struct {
             return 0;
         }
 
-        const volume: f32 = (@as(f32, @floatFromInt(self.volume)) / 16);
+        const volume: f32 = (@as(f32, @floatFromInt(self.initial_volume)) / 16);
         const wave: f32 = switch (self.duty) {
             0 => if (self.ptr < 7) 1 else -1,
             1 => if (self.ptr < 6) 1 else -1,
@@ -461,7 +530,7 @@ const Channel3 = struct {
     length_enable: bool,
 
     length_divider: u14,
-    length: u6,
+    length: u8,
     period_divider: u11,
 
     ptr: u4,
@@ -514,7 +583,6 @@ const Channel3 = struct {
 
     fn trigger(self: *Self) void {
         self.period_divider = self.period;
-        self.volume = self.initial_volume;
         self.length = self.initial_timer_length;
         self.running = true;
     }
