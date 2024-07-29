@@ -155,7 +155,7 @@ pub const MBC1 = struct {
                 self.ram_enabled = (val & 0xF) == 0xA;
             },
             0x2000...0x3FFF => {
-                self.rom_bank = val & 0x03; //& 0x1F;
+                self.rom_bank = val & 0x1F;
             },
             0x4000...0x5FFF => {
                 self.ram_bank = val & 0x03;

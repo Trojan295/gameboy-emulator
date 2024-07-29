@@ -262,7 +262,7 @@ pub const PPU = struct {
 
             const color = self.getColor(&sprite.data, val);
 
-            if (val == 0 or color == 0) {
+            if (val == 0) {
                 continue;
             }
 
