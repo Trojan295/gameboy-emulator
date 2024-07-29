@@ -308,7 +308,6 @@ const Timer = struct {
             else => 255,
         };
 
-        std.debug.print("timer read {x}: {x}\n", .{ addr, val });
         return val;
     }
 };

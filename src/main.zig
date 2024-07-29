@@ -80,18 +80,20 @@ const Emulator = struct {
 
                 self.cycles += duration;
 
-                if (self.cycles > 16777) {
-                    self.cycles -= 16777;
+                if (self.cycles >= 67108) {
+                    self.cycles -= 67108;
                     break;
                 }
             }
 
             const end = try std.time.Instant.now();
             const elapsed = end.since(start_time);
-            const wait_time, const overflow = @subWithOverflow(4 * std.time.ns_per_ms, elapsed);
+            const wait_time, const overflow = @subWithOverflow(16 * std.time.ns_per_ms, elapsed);
             if (overflow == 0) {
                 const wait_ms: u32 = @intCast(wait_time / @as(u64, 1E6));
                 c.SDL_Delay(wait_ms);
+            } else {
+                std.debug.print("too slow...\n", .{});
             }
         }
     }

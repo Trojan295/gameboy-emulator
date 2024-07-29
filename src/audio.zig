@@ -105,8 +105,13 @@ pub const Audio = struct {
         if (self.sample_counter >= 95) {
             self.sample_counter -= 95;
 
-            const sample = (self.ch1.getSample() + self.ch2.getSample() + self.ch3.getSample() + self.ch4.getSample()) / 4;
-            self.buffer[self.buf_pos] = sample;
+            var sample: f32 = 0;
+            sample += self.ch1.getSample() / 4;
+            sample += self.ch2.getSample() / 4;
+            sample += self.ch3.getSample() / 4;
+            sample += self.ch4.getSample() / 4;
+
+            self.buffer[self.buf_pos] = sample / 4;
             self.buf_pos += 1;
 
             if (self.buf_pos == self.buffer.len) {
@@ -134,14 +139,14 @@ pub const Audio = struct {
 
     pub fn read(self: *Self, addr: u16) u8 {
         const val: u8 = switch (addr) {
-            0xff10 => @as(u8, self.ch1.period_step) + (@as(u8, self.ch1.period_pace) << 4) + boolToInt(self.ch1.period_direction, 3) + 0x80,
+            0xff10 => @as(u8, self.ch1.sweep_shift) + (@as(u8, self.ch1.sweep_period) << 4) + boolToInt(self.ch1.sweep_direction, 3) + 0x80,
             0xff11 => 0x3f + (@as(u8, self.ch1.duty) << 6),
-            0xff12 => @as(u8, self.ch1.env_sweep_pace) + boolToInt(self.ch1.env_dir, 3) + (@as(u8, self.ch1.initial_volume) << 4),
+            0xff12 => @as(u8, self.ch1.env_period) + boolToInt(self.ch1.env_dir, 3) + (@as(u8, self.ch1.initial_volume) << 4),
             0xff13 => 0xff,
             0xff14 => 0xbf + boolToInt(self.ch1.length_enable, 6),
 
             0xff16 => 0x3f + (@as(u8, self.ch2.duty) << 6),
-            0xff17 => @as(u8, self.ch2.env_sweep_pace) + boolToInt(self.ch2.env_dir, 3) + (@as(u8, self.ch2.initial_volume) << 4),
+            0xff17 => @as(u8, self.ch2.env_period) + boolToInt(self.ch2.env_dir, 3) + (@as(u8, self.ch2.initial_volume) << 4),
             0xff18 => 0xff,
             0xff19 => 0xbf + boolToInt(self.ch2.length_enable, 6),
 
@@ -152,7 +157,7 @@ pub const Audio = struct {
             0xff1e => 0xbf + boolToInt(self.ch3.length_enable, 6),
 
             0xff20 => 0xff,
-            0xff21 => @as(u8, self.ch4.env_sweep_pace) + boolToInt(self.ch4.env_dir, 3) + (@as(u8, self.ch4.initial_volume) << 4),
+            0xff21 => @as(u8, self.ch4.env_period) + boolToInt(self.ch4.env_dir, 3) + (@as(u8, self.ch4.initial_volume) << 4),
             0xff22 => @as(u8, self.ch4.clock_divider) + boolToInt(self.ch4.lfsr_width, 3) + (@as(u8, self.ch4.clock_shift) << 4),
             0xff23 => 0xbf + boolToInt(self.ch4.length_enable, 6),
 
@@ -164,7 +169,7 @@ pub const Audio = struct {
             else => 0xff,
         };
 
-        std.debug.print("audio read {x}: {x}\n", .{ addr, val });
+        //std.debug.print("audio read {x}: {x}\n", .{ addr, val });
 
         return val;
     }
@@ -174,7 +179,7 @@ pub const Audio = struct {
     }
 
     pub fn write(self: *Self, addr: u16, val: u8) void {
-        std.debug.print("audio write {x}: {x}\n", .{ addr, val });
+        //std.debug.print("audio write {x}: {x}\n", .{ addr, val });
 
         if (!self.nr52.audio_on and addr != 0xff26) {
             return;
@@ -182,16 +187,16 @@ pub const Audio = struct {
 
         switch (addr) {
             0xff10 => {
-                self.ch1.period_step = @truncate(val);
-                self.ch1.period_direction = val & 0x8 == 0x8;
-                self.ch1.period_pace = @truncate(val >> 4);
+                self.ch1.sweep_shift = @truncate(val);
+                self.ch1.sweep_direction = val & 0x8 == 0x8;
+                self.ch1.sweep_period = @truncate(val >> 4);
             },
             0xff11 => {
-                self.ch1.length = @truncate(val);
+                self.ch1.length = @truncate(val & 0x3f);
                 self.ch1.duty = @truncate(val >> 6);
             },
             0xff12 => {
-                self.ch1.env_sweep_pace = @truncate(val);
+                self.ch1.env_period = @truncate(val);
                 self.ch1.env_dir = val & 0x8 == 0x8;
                 self.ch1.initial_volume = @truncate(val >> 4);
                 if (!self.ch1.dacEnabled()) {
@@ -203,18 +208,28 @@ pub const Audio = struct {
             },
             0xff14 => {
                 self.ch1.period = (@as(u11, val & 0x7) << 8) + (self.ch1.period & 0xff);
-                self.ch1.length_enable = val & 0x40 == 0x40;
+                const enable_length = val & 0x40 == 0x40;
+                const trigger = val & 0x80 == 0x80;
 
-                if (val & 0x80 == 0x80) {
-                    self.ch1.trigger();
+                if (enable_length and !self.ch1.length_enable and !self.ch1.frame_sequencer.nextClocks().length and self.ch1.length != 64) {
+                    self.ch1.length += 1;
+                    if (self.ch1.length == 64) {
+                        self.ch1.running = false;
+                    }
                 }
+
+                if (trigger) {
+                    self.ch1.trigger(enable_length);
+                }
+
+                self.ch1.length_enable = enable_length;
             },
             0xff16 => {
-                self.ch2.length = @truncate(val);
+                self.ch2.length = @truncate(val & 0x3f);
                 self.ch2.duty = @truncate(val >> 6);
             },
             0xff17 => {
-                self.ch2.env_sweep_pace = @truncate(val);
+                self.ch2.env_period = @truncate(val);
                 self.ch2.env_dir = val & 0x8 == 0x8;
                 self.ch2.initial_volume = @truncate(val >> 4);
                 if (!self.ch2.dacEnabled()) {
@@ -226,10 +241,21 @@ pub const Audio = struct {
             },
             0xff19 => {
                 self.ch2.period = (@as(u11, val & 0x7) << 8) + (self.ch2.period & 0xff);
-                self.ch2.length_enable = val & 0x40 == 0x40;
-                if (val & 0x80 == 0x80) {
-                    self.ch2.trigger();
+                const enable_length = val & 0x40 == 0x40;
+                const trigger = val & 0x80 == 0x80;
+
+                if (enable_length and !self.ch2.length_enable and !self.ch2.frame_sequencer.nextClocks().length and self.ch2.length < 64) {
+                    self.ch2.length += 1;
+                    if (self.ch2.length == 64) {
+                        self.ch2.running = false;
+                    }
                 }
+
+                if (trigger) {
+                    self.ch2.trigger(enable_length);
+                }
+
+                self.ch2.length_enable = enable_length;
             },
             0xff1a => {
                 self.ch3.dac_on = val & 0x80 == 0x80;
@@ -248,16 +274,27 @@ pub const Audio = struct {
             },
             0xff1e => {
                 self.ch3.period = (@as(u11, val & 0x7) << 8) + (self.ch3.period & 0xff);
-                self.ch3.length_enable = val & 0x40 == 0x40;
-                if (val & 0x80 == 0x80 and self.ch3.dac_on) {
-                    self.ch3.trigger();
+                const enable_length = val & 0x40 == 0x40;
+                const trigger = val & 0x80 == 0x80;
+
+                if (enable_length and !self.ch3.length_enable and !self.ch3.frame_sequencer.nextClocks().length and self.ch3.length < 256) {
+                    self.ch3.length += 1;
+                    if (self.ch3.length == 256) {
+                        self.ch3.running = false;
+                    }
                 }
+
+                if (trigger) {
+                    self.ch3.trigger(enable_length);
+                }
+
+                self.ch3.length_enable = enable_length;
             },
             0xff20 => {
-                self.ch4.length = @truncate(val);
+                self.ch4.length = @truncate(val & 0x3f);
             },
             0xff21 => {
-                self.ch4.env_sweep_pace = @truncate(val);
+                self.ch4.env_period = @truncate(val);
                 self.ch4.env_dir = val & 0x8 == 0x8;
                 self.ch4.initial_volume = @truncate(val >> 4);
                 if (!self.ch4.dacEnabled()) {
@@ -270,8 +307,21 @@ pub const Audio = struct {
                 self.ch4.clock_shift = @truncate(val >> 4);
             },
             0xff23 => {
-                self.ch4.length_enable = val & 0x40 == 0x40;
-                if (val & 0x80 == 0x80 and self.ch4.dacEnabled()) self.ch4.trigger();
+                const enable_length = val & 0x40 == 0x40;
+                const trigger = val & 0x80 == 0x80;
+
+                if (enable_length and !self.ch4.length_enable and !self.ch4.frame_sequencer.nextClocks().length and self.ch4.length < 64) {
+                    self.ch4.length += 1;
+                    if (self.ch4.length == 64) {
+                        self.ch4.running = false;
+                    }
+                }
+
+                if (trigger) {
+                    self.ch4.trigger(enable_length);
+                }
+
+                self.ch4.length_enable = enable_length;
             },
             0xff24 => self.nr50 = @bitCast(val),
             0xff25 => self.nr51 = @bitCast(val),
@@ -298,25 +348,26 @@ const Channel1 = struct {
     ticks: usize,
     running: bool,
 
-    period_pace: u3,
-    period_direction: bool,
-    period_step: u3,
+    length_enable: bool,
+    length: u7,
+
+    freq_shadow_req: u11,
+    sweep_enabled: bool,
+    sweep_timer: u3,
+    sweep_period: u3,
+    sweep_direction: bool,
+    sweep_shift: u3,
+
     duty: u2,
+
     initial_volume: u4,
     env_dir: bool,
-    env_sweep_pace: u3,
-    period: u11,
-    length_enable: bool,
-
-    length_divider: u14,
-    length: u6,
-    period_divider: u11,
-
-    period_sweep_divider: u15,
-    period_sweep_counter: u3,
-
+    env_period: u3,
+    env_timer: u3,
     volume: u4,
-    env_divider: u16,
+
+    period: u11,
+    period_divider: u11,
 
     ptr: u3,
 
@@ -329,24 +380,25 @@ const Channel1 = struct {
             .ticks = 0,
             .running = false,
 
-            .period_pace = 0,
-            .period_direction = false,
-            .period_step = 0,
+            .length_enable = false,
+            .length = 0,
+
+            .freq_shadow_req = 0,
+            .sweep_enabled = false,
+            .sweep_timer = 0,
+
+            .sweep_period = 0,
+            .sweep_direction = false,
+            .sweep_shift = 0,
             .duty = 0,
             .initial_volume = 0,
             .env_dir = false,
-            .env_sweep_pace = 0,
-            .period = 0,
-            .length_enable = false,
+            .env_period = 0,
+            .env_timer = 0,
 
-            .length = 0,
-            .length_divider = 0,
+            .period = 0,
             .period_divider = 0,
 
-            .period_sweep_divider = 0,
-            .period_sweep_counter = 0,
-
-            .env_divider = 0,
             .volume = 0,
 
             .ptr = 0,
@@ -368,51 +420,83 @@ const Channel1 = struct {
         }
 
         const clocks = self.frame_sequencer.tick(ticks);
-        //{
-        //    self.period_sweep_divider, const of = @addWithOverflow(self.period_sweep_divider, @as(u15, @intCast(ticks)));
-        //    if (of > 0 and self.period_pace > 0) {
-        //        self.period_sweep_counter, const lof = @subWithOverflow(self.period_sweep_counter, 1);
-        //        if (lof > 0) {
-        //            self.period_sweep_counter = self.period_pace;
-        //            const delta: u11 = @intFromFloat(@as(f32, @floatFromInt(self.period)) / std.math.pow(f32, 2, @floatFromInt(self.period_step)));
-        //            if (self.period_direction) {
-        //                self.period -= delta;
-        //            } else {
-        //                self.period, const dof = @addWithOverflow(self.period, delta);
-        //                if (dof > 0) {
-        //                    self.period_pace = 0;
-        //                    self.running = false;
-        //                }
-        //            }
-        //        }
-        //    }
-        //}
 
-        //{
-        //    self.env_divider, const of = @addWithOverflow(self.env_divider, @as(u16, @intCast(ticks)));
-        //    if (of > 0) {
-        //        if (self.env_dir) {
-        //            if (self.volume != 15) self.volume += 1;
-        //        } else {
-        //            if (self.volume != 0) self.volume -= 1;
-        //        }
-        //    }
-        //}
+        if (clocks.sweep and self.sweep_enabled and self.sweep_period > 0) {
+            self.sweep_timer, const lof = @subWithOverflow(self.sweep_timer, 1);
 
-        if (clocks.length and self.length_enable) {
-            self.length, const lof = @addWithOverflow(self.length, 1);
             if (lof > 0) {
+                self.sweep_timer = self.sweep_period - 1;
+
+                const next_period = self.nextSweepPeriod();
+
+                if (next_period.overflow) {
+                    self.running = false;
+                } else {
+                    if (self.sweep_shift > 0) {
+                        self.period = next_period.period;
+                        self.freq_shadow_req = next_period.period;
+
+                        if (self.nextSweepPeriod().overflow) self.running = false;
+                    }
+                }
+            }
+        }
+
+        if (clocks.vol_env and self.env_period > 0) {
+            self.env_timer, const eof = @subWithOverflow(self.env_timer, 1);
+
+            if (eof > 0) {
+                self.env_timer = self.env_period - 1;
+
+                if (self.env_dir) {
+                    if (self.volume < 15) self.volume += 1;
+                } else {
+                    if (self.volume > 1) self.volume -= 1;
+                }
+            }
+        }
+
+        if (clocks.length and self.length_enable and self.length < 64) {
+            self.length += 1;
+            if (self.length == 64) {
                 self.running = false;
             }
         }
     }
 
-    fn trigger(self: *Self) void {
-        if (!self.dacEnabled()) return;
+    fn trigger(self: *Self, enable_length: bool) void {
+        if (self.length == 64) {
+            const next_len_clock = self.frame_sequencer.nextClocks().length;
+            if (enable_length and !next_len_clock) self.length = 1 else self.length = 0;
+        }
 
         self.period_divider = self.period;
         self.volume = self.initial_volume;
+
+        self.freq_shadow_req = self.period;
+        self.sweep_enabled = (self.sweep_shift > 0) or (self.sweep_period > 0);
+        if (self.sweep_period > 0) self.sweep_timer = self.sweep_period - 1;
+
+        const next_sweep = self.nextSweepPeriod();
+        if (self.sweep_shift > 0) {
+            if (next_sweep.overflow) return;
+            self.period = next_sweep.period;
+        }
+
+        if (!self.dacEnabled()) return;
+
         self.running = true;
+    }
+
+    fn nextSweepPeriod(self: *const Self) struct { period: u11, overflow: bool } {
+        const delta: u11 = @intFromFloat(@as(f32, @floatFromInt(self.freq_shadow_req)) / std.math.pow(f32, 2, @floatFromInt(self.sweep_shift)));
+
+        if (self.sweep_direction) {
+            return .{ .period = self.freq_shadow_req - delta, .overflow = false };
+        } else {
+            const period, const of = @addWithOverflow(self.freq_shadow_req, delta);
+            return .{ .period = period, .overflow = of > 0 };
+        }
     }
 
     fn dacEnabled(self: *Self) bool {
@@ -444,18 +528,19 @@ const Channel2 = struct {
     ticks: usize,
     running: bool,
 
+    length_enable: bool,
+    length: u7,
+
     duty: u2,
+
     initial_volume: u4,
     env_dir: bool,
-    env_sweep_pace: u3,
-    period: u11,
-    length_enable: bool,
-
-    length_divider: u14,
-    length: u6,
-    period_divider: u11,
+    env_period: u3,
+    env_timer: u3,
     volume: u4,
-    env_divider: u16,
+
+    period: u11,
+    period_divider: u11,
 
     ptr: u3,
 
@@ -468,17 +553,18 @@ const Channel2 = struct {
             .ticks = 0,
             .running = false,
 
+            .length_enable = false,
+            .length = 0,
+
             .duty = 0,
             .initial_volume = 0,
             .env_dir = false,
-            .env_sweep_pace = 0,
-            .period = 0,
-            .length_enable = false,
+            .env_period = 0,
+            .env_timer = 0,
 
-            .length_divider = 0,
-            .length = 0,
+            .period = 0,
             .period_divider = 0,
-            .env_divider = 0,
+
             .volume = 0,
 
             .ptr = 0,
@@ -501,30 +587,39 @@ const Channel2 = struct {
 
         const clocks = self.frame_sequencer.tick(ticks);
 
-        //{
-        //    self.env_divider, const of = @addWithOverflow(self.env_divider, @as(u16, @intCast(ticks)));
-        //    if (of > 0) {
-        //        if (self.env_dir) {
-        //            if (self.volume != 15) self.volume += 1;
-        //        } else {
-        //            if (self.volume != 0) self.volume -= 1;
-        //        }
-        //    }
-        //}
+        if (clocks.vol_env and self.env_period > 0) {
+            self.env_timer, const eof = @subWithOverflow(self.env_timer, 1);
 
-        if (clocks.length and self.length_enable) {
-            self.length, const lof = @addWithOverflow(self.length, 1);
-            if (lof > 0) {
+            if (eof > 0) {
+                self.env_timer = self.env_period - 1;
+
+                if (self.env_dir) {
+                    if (self.volume < 15) self.volume += 1;
+                } else {
+                    if (self.volume > 1) self.volume -= 1;
+                }
+            }
+        }
+
+        if (clocks.length and self.length_enable and self.length < 64) {
+            self.length += 1;
+            if (self.length == 64) {
                 self.running = false;
             }
         }
     }
 
-    fn trigger(self: *Self) void {
-        if (!self.dacEnabled()) return;
+    fn trigger(self: *Self, enable_length: bool) void {
+        if (self.length == 64) {
+            const next_len_clock = self.frame_sequencer.nextClocks().length;
+            if (enable_length and !next_len_clock) self.length = 1 else self.length = 0;
+        }
 
         self.period_divider = self.period;
         self.volume = self.initial_volume;
+
+        if (!self.dacEnabled()) return;
+
         self.running = true;
     }
 
@@ -541,7 +636,7 @@ const Channel2 = struct {
             return 0;
         }
 
-        const volume: f32 = (@as(f32, @floatFromInt(self.initial_volume)) / 16);
+        const volume: f32 = (@as(f32, @floatFromInt(self.volume)) / 16);
         const wave: f32 = switch (self.duty) {
             0 => if (self.ptr < 7) 1 else -1,
             1 => if (self.ptr < 6) 1 else -1,
@@ -562,8 +657,7 @@ const Channel3 = struct {
     period: u11,
     length_enable: bool,
 
-    length_divider: u14,
-    length: u8,
+    length: u9,
     period_divider: u11,
 
     ptr: u4,
@@ -583,7 +677,6 @@ const Channel3 = struct {
             .period = 0,
             .length_enable = false,
 
-            .length_divider = 0,
             .length = 0,
             .period_divider = 0,
 
@@ -608,16 +701,24 @@ const Channel3 = struct {
 
         const clocks = self.frame_sequencer.tick(ticks);
 
-        if (clocks.length and self.length_enable) {
-            self.length, const lof = @addWithOverflow(self.length, 1);
-            if (lof > 0) {
+        if (clocks.length and self.length_enable and self.length < 256) {
+            self.length += 1;
+            if (self.length == 256) {
                 self.running = false;
             }
         }
     }
 
-    fn trigger(self: *Self) void {
+    fn trigger(self: *Self, enable_length: bool) void {
+        if (self.length == 256) {
+            const next_len_clock = self.frame_sequencer.nextClocks().length;
+            if (enable_length and !next_len_clock) self.length = 1 else self.length = 0;
+        }
+
         self.period_divider = self.period;
+
+        if (!self.dac_on) return;
+
         self.running = true;
     }
 
@@ -641,21 +742,26 @@ const Channel4 = struct {
     ticks: usize,
     running: bool,
 
-    clock_shift: u4,
-    lfsr_width: bool,
-    clock_divider: u3,
     length_enable: bool,
+    length: u7,
+
+    duty: u2,
+
     initial_volume: u4,
     env_dir: bool,
-    env_sweep_pace: u3,
-
+    env_period: u3,
+    env_timer: u3,
     volume: u4,
-    env_divider: u16,
 
-    length_divider: u14,
-    length: u6,
-
+    clock_divider: u3,
+    lfsr_width: bool,
+    clock_shift: u4,
     lfsr: u16,
+    lfsr_timer: usize,
+
+    ptr: u3,
+
+    frame_sequencer: FrameSequencer,
 
     const Self = @This();
 
@@ -664,49 +770,95 @@ const Channel4 = struct {
             .ticks = 0,
             .running = false,
 
-            .clock_shift = 0,
-            .lfsr_width = false,
-            .clock_divider = 0,
             .length_enable = false,
-            .initial_volume = 0,
-            .env_dir = false,
-            .env_sweep_pace = 0,
-
-            .env_divider = 0,
-            .volume = 0,
-
-            .length_divider = 0,
             .length = 0,
 
+            .duty = 0,
+            .initial_volume = 0,
+            .env_dir = false,
+            .env_period = 0,
+            .env_timer = 0,
+            .volume = 0,
+
+            .clock_divider = 0,
+            .lfsr_width = false,
+            .clock_shift = 0,
             .lfsr = 0,
+            .lfsr_timer = 0,
+
+            .ptr = 0,
+
+            .frame_sequencer = FrameSequencer.new(),
         };
     }
 
     fn tick(self: *Self, ticks: usize) void {
-        {
-            self.env_divider, const of = @addWithOverflow(self.env_divider, @as(u16, @intCast(ticks)));
-            if (of > 0) {
+        self.ticks += ticks;
+        while (self.ticks >= 4) {
+            self.ticks -= 4;
+            self.lfsr_timer += 1;
+            const freq = self.frequency();
+
+            if (self.lfsr_timer >= freq) {
+                //std.debug.print("freq: {}\n", .{freq});
+                self.lfsr_timer = 0;
+                self.shiftLfsr();
+            }
+        }
+
+        const clocks = self.frame_sequencer.tick(ticks);
+
+        if (clocks.vol_env and self.env_period > 0) {
+            self.env_timer, const eof = @subWithOverflow(self.env_timer, 1);
+
+            if (eof > 0) {
+                self.env_timer = self.env_period - 1;
+
                 if (self.env_dir) {
-                    if (self.volume != 15) self.volume += 1;
+                    if (self.volume < 15) self.volume += 1;
                 } else {
-                    if (self.volume != 0) self.volume -= 1;
+                    if (self.volume > 1) self.volume -= 1;
                 }
             }
         }
 
-        if (self.length_enable) {
-            self.length_divider, const of = @addWithOverflow(self.length_divider, @as(u14, @intCast(ticks)));
-            if (of > 0) {
-                self.length, const lof = @addWithOverflow(self.length, 1);
-                if (lof > 0) {
-                    self.running = false;
-                }
+        if (clocks.length and self.length_enable and self.length < 64) {
+            self.length += 1;
+            if (self.length == 64) {
+                self.running = false;
             }
         }
     }
 
-    fn trigger(self: *Self) void {
-        self.lfsr = 1;
+    fn frequency(self: *const Self) usize {
+        const divider: f32 = if (self.clock_divider == 0) 0.5 else @floatFromInt(self.clock_divider);
+        const shift: f32 = std.math.pow(f32, 2, @floatFromInt(self.clock_shift));
+
+        return @intFromFloat(divider * shift);
+    }
+
+    fn shiftLfsr(self: *Self) void {
+        const bit0: u1 = @truncate(self.lfsr);
+        const bit1: u1 = @truncate(self.lfsr >> 1);
+        const result: u1 = if (bit0 == bit1) 1 else 0;
+
+        self.lfsr = @shrExact(self.lfsr & 0xfffe, 1) + (@as(u16, result) << 15);
+        //if (self.lfsr_width) {
+        //    self.lfsr = (self.lfsr & 0xff7f) + (@as(u16, result) << 7);
+        //}
+    }
+
+    fn trigger(self: *Self, enable_length: bool) void {
+        if (self.length == 64) {
+            const next_len_clock = self.frame_sequencer.nextClocks().length;
+            if (enable_length and !next_len_clock) self.length = 1 else self.length = 0;
+        }
+
+        self.volume = self.initial_volume;
+        self.lfsr = 0;
+
+        if (!self.dacEnabled()) return;
+
         self.running = true;
     }
 
@@ -723,7 +875,9 @@ const Channel4 = struct {
             return 0;
         }
 
-        return if (self.lfsr & 0x01 == 0x01) @as(f32, @floatFromInt(self.volume)) / 15 else 0;
+        const amplitude = @as(f32, @floatFromInt(self.volume)) / 16;
+
+        return if (self.lfsr & 0x01 == 0x01) amplitude else -amplitude;
     }
 };
 
