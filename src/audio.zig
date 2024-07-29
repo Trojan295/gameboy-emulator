@@ -1,3 +1,6 @@
+// TODO: move the reads/writes to the Channel structs
+// TODO: create frame sequencer (state machine?) to clock modulation units
+
 const std = @import("std");
 const AudioError = @import("errors.zig").AudioError;
 const c = @cImport({
@@ -155,11 +158,13 @@ pub const Audio = struct {
 
             0xff24 => @bitCast(self.nr50),
             0xff25 => @bitCast(self.nr51),
-            0xff26 => @as(u8, @bitCast(self.nr52)) + 0x70 + boolToInt(self.ch1.isRunning(), 0) + boolToInt(self.ch2.isRunning(), 1) + boolToInt(self.ch3.isRunning(), 2) + boolToInt(self.ch4.running, 3),
+            0xff26 => @as(u8, @bitCast(self.nr52)) + 0x70 + boolToInt(self.ch1.isRunning(), 0) + boolToInt(self.ch2.isRunning(), 1) + boolToInt(self.ch3.isRunning(), 2) + boolToInt(self.ch4.isRunning(), 3),
 
             0xff30...0xff3f => self.ch3.wave[addr - 0xff30],
             else => 0xff,
         };
+
+        std.debug.print("audio read {x}: {x}\n", .{ addr, val });
 
         return val;
     }
@@ -169,6 +174,8 @@ pub const Audio = struct {
     }
 
     pub fn write(self: *Self, addr: u16, val: u8) void {
+        std.debug.print("audio write {x}: {x}\n", .{ addr, val });
+
         if (!self.nr52.audio_on and addr != 0xff26) {
             return;
         }
@@ -197,6 +204,7 @@ pub const Audio = struct {
             0xff14 => {
                 self.ch1.period = (@as(u11, val & 0x7) << 8) + (self.ch1.period & 0xff);
                 self.ch1.length_enable = val & 0x40 == 0x40;
+
                 if (val & 0x80 == 0x80) {
                     self.ch1.trigger();
                 }
@@ -312,6 +320,8 @@ const Channel1 = struct {
 
     ptr: u3,
 
+    frame_sequencer: FrameSequencer,
+
     const Self = @This();
 
     fn new() Self {
@@ -340,6 +350,8 @@ const Channel1 = struct {
             .volume = 0,
 
             .ptr = 0,
+
+            .frame_sequencer = FrameSequencer.new(),
         };
     }
 
@@ -355,41 +367,41 @@ const Channel1 = struct {
             }
         }
 
-        {
-            self.period_sweep_divider, const of = @addWithOverflow(self.period_sweep_divider, @as(u15, @intCast(ticks)));
-            if (of > 0 and self.period_pace > 0) {
-                self.period_sweep_counter, const lof = @subWithOverflow(self.period_sweep_counter, 1);
-                if (lof > 0) {
-                    self.period_sweep_counter = self.period_pace;
-                    const delta: u11 = @intFromFloat(@as(f32, @floatFromInt(self.period)) / std.math.pow(f32, 2, @floatFromInt(self.period_step)));
-                    if (self.period_direction) {
-                        self.period -= delta;
-                    } else {
-                        self.period, const dof = @addWithOverflow(self.period, delta);
-                        if (dof > 0) {
-                            self.period_pace = 0;
-                            self.running = false;
-                        }
-                    }
-                }
-            }
-        }
+        const clocks = self.frame_sequencer.tick(ticks);
+        //{
+        //    self.period_sweep_divider, const of = @addWithOverflow(self.period_sweep_divider, @as(u15, @intCast(ticks)));
+        //    if (of > 0 and self.period_pace > 0) {
+        //        self.period_sweep_counter, const lof = @subWithOverflow(self.period_sweep_counter, 1);
+        //        if (lof > 0) {
+        //            self.period_sweep_counter = self.period_pace;
+        //            const delta: u11 = @intFromFloat(@as(f32, @floatFromInt(self.period)) / std.math.pow(f32, 2, @floatFromInt(self.period_step)));
+        //            if (self.period_direction) {
+        //                self.period -= delta;
+        //            } else {
+        //                self.period, const dof = @addWithOverflow(self.period, delta);
+        //                if (dof > 0) {
+        //                    self.period_pace = 0;
+        //                    self.running = false;
+        //                }
+        //            }
+        //        }
+        //    }
+        //}
 
-        {
-            self.env_divider, const of = @addWithOverflow(self.env_divider, @as(u16, @intCast(ticks)));
-            if (of > 0) {
-                if (self.env_dir) {
-                    if (self.volume != 15) self.volume += 1;
-                } else {
-                    if (self.volume != 0) self.volume -= 1;
-                }
-            }
-        }
+        //{
+        //    self.env_divider, const of = @addWithOverflow(self.env_divider, @as(u16, @intCast(ticks)));
+        //    if (of > 0) {
+        //        if (self.env_dir) {
+        //            if (self.volume != 15) self.volume += 1;
+        //        } else {
+        //            if (self.volume != 0) self.volume -= 1;
+        //        }
+        //    }
+        //}
 
-        self.length_divider, const of = @addWithOverflow(self.length_divider, @as(u14, @intCast(ticks)));
-        if (of > 0 and self.length_enable) {
+        if (clocks.length and self.length_enable) {
             self.length, const lof = @addWithOverflow(self.length, 1);
-            if (lof > 0 and self.isRunning()) {
+            if (lof > 0) {
                 self.running = false;
             }
         }
@@ -447,6 +459,8 @@ const Channel2 = struct {
 
     ptr: u3,
 
+    frame_sequencer: FrameSequencer,
+
     const Self = @This();
 
     fn new() Self {
@@ -468,6 +482,8 @@ const Channel2 = struct {
             .volume = 0,
 
             .ptr = 0,
+
+            .frame_sequencer = FrameSequencer.new(),
         };
     }
 
@@ -483,19 +499,20 @@ const Channel2 = struct {
             }
         }
 
-        {
-            self.env_divider, const of = @addWithOverflow(self.env_divider, @as(u16, @intCast(ticks)));
-            if (of > 0) {
-                if (self.env_dir) {
-                    if (self.volume != 15) self.volume += 1;
-                } else {
-                    if (self.volume != 0) self.volume -= 1;
-                }
-            }
-        }
+        const clocks = self.frame_sequencer.tick(ticks);
 
-        self.length_divider, const of = @addWithOverflow(self.length_divider, @as(u14, @intCast(ticks)));
-        if (of > 0 and self.length_enable) {
+        //{
+        //    self.env_divider, const of = @addWithOverflow(self.env_divider, @as(u16, @intCast(ticks)));
+        //    if (of > 0) {
+        //        if (self.env_dir) {
+        //            if (self.volume != 15) self.volume += 1;
+        //        } else {
+        //            if (self.volume != 0) self.volume -= 1;
+        //        }
+        //    }
+        //}
+
+        if (clocks.length and self.length_enable) {
             self.length, const lof = @addWithOverflow(self.length, 1);
             if (lof > 0) {
                 self.running = false;
@@ -552,6 +569,8 @@ const Channel3 = struct {
     ptr: u4,
     wave: [16]u8,
 
+    frame_sequencer: FrameSequencer,
+
     const Self = @This();
 
     fn new() Self {
@@ -570,6 +589,8 @@ const Channel3 = struct {
 
             .ptr = 0,
             .wave = undefined,
+
+            .frame_sequencer = FrameSequencer.new(),
         };
     }
 
@@ -585,13 +606,12 @@ const Channel3 = struct {
             }
         }
 
-        if (self.length_enable) {
-            self.length_divider, const of = @addWithOverflow(self.length_divider, @as(u14, @intCast(ticks)));
-            if (of > 0) {
-                self.length, const lof = @addWithOverflow(self.length, 1);
-                if (lof > 0) {
-                    self.running = false;
-                }
+        const clocks = self.frame_sequencer.tick(ticks);
+
+        if (clocks.length and self.length_enable) {
+            self.length, const lof = @addWithOverflow(self.length, 1);
+            if (lof > 0) {
+                self.running = false;
             }
         }
     }
@@ -704,5 +724,51 @@ const Channel4 = struct {
         }
 
         return if (self.lfsr & 0x01 == 0x01) @as(f32, @floatFromInt(self.volume)) / 15 else 0;
+    }
+};
+
+const FrameSequencer = struct {
+    divider: u13,
+    state: u3,
+
+    const Clocks = struct {
+        length: bool,
+        vol_env: bool,
+        sweep: bool,
+    };
+
+    const Self = @This();
+
+    fn new() FrameSequencer {
+        return Self{
+            .divider = 0,
+            .state = 0,
+        };
+    }
+
+    fn tick(self: *Self, ticks: usize) Clocks {
+        self.divider, const overflow = @addWithOverflow(self.divider, @as(u13, @truncate(ticks)));
+        if (overflow > 0) {
+            self.state +%= 1;
+            return getClocks(self.state);
+        }
+        return Clocks{ .length = false, .vol_env = false, .sweep = false };
+    }
+
+    fn nextClocks(self: *const Self) Clocks {
+        return getClocks(self.state +% 1);
+    }
+
+    fn getClocks(state: u3) Clocks {
+        return switch (state) {
+            0 => Clocks{ .length = true, .vol_env = false, .sweep = false },
+            1 => Clocks{ .length = false, .vol_env = false, .sweep = false },
+            2 => Clocks{ .length = true, .vol_env = false, .sweep = true },
+            3 => Clocks{ .length = false, .vol_env = false, .sweep = false },
+            4 => Clocks{ .length = true, .vol_env = false, .sweep = false },
+            5 => Clocks{ .length = false, .vol_env = false, .sweep = false },
+            6 => Clocks{ .length = true, .vol_env = false, .sweep = true },
+            7 => Clocks{ .length = false, .vol_env = true, .sweep = false },
+        };
     }
 };
