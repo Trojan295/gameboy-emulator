@@ -1,5 +1,6 @@
 const std = @import("std");
 const PPU = @import("ppu.zig").PPU;
+const LCD = @import("ppu.zig").LCD;
 const Cartridge = @import("mbc.zig").Cartridge;
 const Audio = @import("audio.zig").Audio;
 const MemoryError = @import("errors.zig").MemoryError;
@@ -23,7 +24,7 @@ pub const Memory = struct {
 
     const Self = @This();
 
-    pub fn new(alloc: std.mem.Allocator, boot: []const u8, cartridge: Cartridge) !Self {
+    pub fn new(alloc: std.mem.Allocator, boot: []const u8, cartridge: Cartridge, lcd: *LCD) !Self {
         const interrupts: *Interrupts = try alloc.create(Interrupts);
         interrupts.* = Interrupts.new();
 
@@ -38,7 +39,7 @@ pub const Memory = struct {
 
         const audio = try Audio.new(alloc);
 
-        const ppu: *PPU = try PPU.new(alloc, &interrupts.vblank, &interrupts.lcd);
+        const ppu: *PPU = try PPU.new(alloc, lcd, &interrupts.vblank, &interrupts.lcd);
         const joypad: *Joypad = try alloc.create(Joypad);
         joypad.* = Joypad.new();
 

@@ -100,7 +100,7 @@ pub const PPU = struct {
 
     const Self = @This();
 
-    pub fn new(alloc: std.mem.Allocator, vblank_interrupt: *bool, stat_interrupt: *bool) !*PPU {
+    pub fn new(alloc: std.mem.Allocator, lcd: *LCD, vblank_interrupt: *bool, stat_interrupt: *bool) !*PPU {
         _ = c.TTF_Init();
 
         const ptr = try alloc.create(PPU);
@@ -109,7 +109,7 @@ pub const PPU = struct {
             .vblank_interrupt = vblank_interrupt,
             .stat_interrupt = stat_interrupt,
             .stat_int_line = false,
-            .lcd = try LCD.new(alloc),
+            .lcd = lcd,
             .oam = undefined,
             .vram = undefined,
             .sprite_buffer = std.ArrayList(Sprite).init(alloc),
@@ -149,7 +149,6 @@ pub const PPU = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        self.lcd.deinit();
         self.sprite_buffer.deinit();
         self.alloc.destroy(self);
     }
@@ -538,6 +537,36 @@ pub const LCD = struct {
         return lcd;
     }
 
+    pub fn setFullscreen(self: *Self) !void {
+        var dm: c.SDL_DisplayMode = undefined;
+
+        if (c.SDL_GetDesktopDisplayMode(0, &dm) != 0) {
+            return DisplayError.InitFailed;
+        }
+
+        const w_scale: f32 = @floatFromInt(@divTrunc(dm.w, width));
+        const h_scale: f32 = @floatFromInt(@divTrunc(dm.h, height));
+
+        const scale = if (w_scale > h_scale) h_scale else w_scale;
+
+        if (c.SDL_SetWindowFullscreen(self.window, c.SDL_WINDOW_FULLSCREEN_DESKTOP) != 0) {
+            return DisplayError.InitFailed;
+        }
+        if (c.SDL_RenderSetScale(self.renderer, scale, scale) != 0) {
+            return DisplayError.InitFailed;
+        }
+    }
+
+    pub fn setWindowMode(self: *Self) !void {
+        const scale = 5;
+
+        c.SDL_SetWindowSize(self.window, width * scale, height * scale);
+
+        if (c.SDL_RenderSetScale(self.renderer, scale, scale) != 0) {
+            return DisplayError.InitFailed;
+        }
+    }
+
     pub fn push_pixel(self: *Self, pixel: u2, x: usize, y: usize) void {
         self.framebuffer[y * width + x] = switch (pixel) {
             0 => Color{ .r = 255, .g = 255, .b = 255, .a = 255 },
@@ -548,6 +577,17 @@ pub const LCD = struct {
     }
 
     pub fn render(self: *Self) !void {
+        var x_scale: f32 = undefined;
+        var y_scale: f32 = undefined;
+        var window_width: i32 = undefined;
+        var window_height: i32 = undefined;
+
+        c.SDL_RenderGetScale(self.renderer, &x_scale, &y_scale);
+        c.SDL_GetWindowSize(self.window, &window_width, &window_height);
+
+        const x_shift: i32 = @intFromFloat((@as(f32, @floatFromInt(window_width)) - (@as(f32, @floatFromInt(width)) * x_scale)) / (2 * x_scale));
+        _ = c.SDL_RenderSetViewport(self.renderer, &c.SDL_Rect{ .x = x_shift, .y = 0, .w = width, .h = height });
+
         const rect = c.SDL_Rect{
             .x = 0,
             .y = 0,

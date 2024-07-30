@@ -2,8 +2,8 @@ const std = @import("std");
 const CPU = @import("cpu.zig").CPU;
 const mbc = @import("mbc.zig");
 const Memory = @import("memory.zig").Memory;
-const Opcode = @import("opcodes.zig").Opcode;
 const LCD = @import("ppu.zig").LCD;
+const Opcode = @import("opcodes.zig").Opcode;
 const c = @cImport({
     @cInclude("SDL2/SDL.h");
 });
@@ -86,14 +86,14 @@ const Emulator = struct {
                 }
             }
 
+            //try self.memory.ppu.lcd.render();
+
             const end = try std.time.Instant.now();
             const elapsed = end.since(start_time);
             const wait_time, const overflow = @subWithOverflow(16 * std.time.ns_per_ms, elapsed);
             if (overflow == 0) {
                 const wait_ms: u32 = @intCast(wait_time / @as(u64, 1E6));
                 c.SDL_Delay(wait_ms);
-            } else {
-                std.debug.print("too slow...\n", .{});
             }
         }
     }
@@ -144,8 +144,35 @@ const Emulator = struct {
                         c.SDL_SCANCODE_L => joypad.b = true,
                         c.SDL_SCANCODE_SPACE => joypad.start = true,
                         c.SDL_SCANCODE_RETURN => joypad.select = true,
+                        c.SDL_SCANCODE_F => try self.memory.ppu.lcd.setFullscreen(),
                         else => {},
                     }
+                },
+                c.SDL_JOYBUTTONUP => {
+                    switch (ev.jbutton.button) {
+                        c.SDL_CONTROLLER_BUTTON_A => joypad.a = true,
+                        c.SDL_CONTROLLER_BUTTON_B => joypad.b = true,
+                        c.SDL_CONTROLLER_BUTTON_START => joypad.start = true,
+                        c.SDL_CONTROLLER_BUTTON_MISC1 => joypad.select = true,
+                        else => {},
+                    }
+                },
+                c.SDL_JOYBUTTONDOWN => {
+                    switch (ev.jbutton.button) {
+                        c.SDL_CONTROLLER_BUTTON_A => joypad.a = false,
+                        c.SDL_CONTROLLER_BUTTON_B => joypad.b = false,
+                        c.SDL_CONTROLLER_BUTTON_START => joypad.start = false,
+                        c.SDL_CONTROLLER_BUTTON_MISC1 => joypad.select = false,
+                        else => {
+                            std.debug.print("btn\n", .{});
+                        },
+                    }
+                },
+                c.SDL_JOYHATMOTION => {
+                    joypad.up = ev.jhat.value & c.SDL_HAT_UP != c.SDL_HAT_UP;
+                    joypad.down = ev.jhat.value & c.SDL_HAT_DOWN != c.SDL_HAT_DOWN;
+                    joypad.left = ev.jhat.value & c.SDL_HAT_LEFT != c.SDL_HAT_LEFT;
+                    joypad.right = ev.jhat.value & c.SDL_HAT_RIGHT != c.SDL_HAT_RIGHT;
                 },
                 else => {},
             }
@@ -166,8 +193,18 @@ pub fn main() !u8 {
     _ = args.skip();
     const rom = args.next().?;
 
-    std.debug.assert(c.SDL_Init(c.SDL_INIT_VIDEO | c.SDL_INIT_AUDIO) == 0);
+    std.debug.assert(c.SDL_Init(c.SDL_INIT_VIDEO | c.SDL_INIT_AUDIO | c.SDL_INIT_JOYSTICK) == 0);
     defer c.SDL_Quit();
+
+    var joystick: ?*c.SDL_Joystick = null;
+    if (c.SDL_NumJoysticks() > 0) {
+        joystick = c.SDL_JoystickOpen(0).?;
+    }
+    defer {
+        if (joystick != null) {
+            c.SDL_JoystickClose(joystick.?);
+        }
+    }
 
     const cartridge_data = try std.fs.cwd().readFileAlloc(alloc, rom, 1024 * 1024);
     defer alloc.free(cartridge_data);
@@ -175,13 +212,17 @@ pub fn main() !u8 {
     var cartridge = try mbc.Cartridge.init(alloc, cartridge_data);
     defer cartridge.deinit();
 
-    var memory = try Memory.new(alloc, &BOOT_ROM, cartridge);
+    const lcd = try LCD.new(alloc);
+    defer lcd.deinit();
+
+    var memory = try Memory.new(alloc, &BOOT_ROM, cartridge, lcd);
     defer memory.deinit();
 
     var cpu = CPU.new(&memory);
     memory.ppu.lcd.cpu = &cpu;
 
     var emulator = Emulator.new(&memory, &cpu);
+
     emulator.start() catch |err| {
         std.debug.print("error: {any}", .{err});
         return 1;

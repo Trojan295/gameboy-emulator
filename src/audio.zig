@@ -1,5 +1,4 @@
 // TODO: move the reads/writes to the Channel structs
-// TODO: create frame sequencer (state machine?) to clock modulation units
 
 const std = @import("std");
 const AudioError = @import("errors.zig").AudioError;
@@ -102,8 +101,8 @@ pub const Audio = struct {
         self.ch4.tick(ticks);
 
         self.sample_counter += ticks;
-        if (self.sample_counter >= 95) {
-            self.sample_counter -= 95;
+        if (self.sample_counter >= 96) {
+            self.sample_counter -= 96;
 
             var sample: f32 = 0;
             sample += self.ch1.getSample() / 4;
@@ -731,10 +730,15 @@ const Channel3 = struct {
             return 0;
         }
 
-        const volume: f32 = (@as(f32, @floatFromInt(self.output_level)) / 16);
-        const wave: f32 = @as(f32, @floatFromInt(self.wave[self.ptr])) / 255;
+        const volume: f32 = switch (self.output_level) {
+            0 => 0,
+            1 => 1,
+            2 => 0.5,
+            3 => 0.25,
+        };
+        const wave: f32 = (@as(f32, @floatFromInt(self.wave[self.ptr])) / 128) - 1;
 
-        return volume * wave;
+        return wave * volume;
     }
 };
 
